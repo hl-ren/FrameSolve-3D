@@ -1,0 +1,28 @@
+{
+  "name": "framesolve-3d",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "build:release": "tsc -b && rolldown src/release-main.tsx --file release/FrameSolve-3D-v1.0/assets/app.js --format iife --name FrameSolve3D --platform browser --minify",
+    "test:beam": "mkdir -p .tmp && rolldown scripts/beam-tests.ts --file .tmp/beam-tests.mjs --format esm --platform node --log-level warn && node .tmp/beam-tests.mjs",
+    "typecheck": "tsc -b",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^5.1.1",
+    "lucide-react": "^0.555.0",
+    "react": "^19.2.1",
+    "react-dom": "^19.2.1",
+    "three": "^0.181.2",
+    "vite": "^8.0.13"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "@types/three": "^0.181.0",
+    "typescript": "^5.9.3"
+  }
+}

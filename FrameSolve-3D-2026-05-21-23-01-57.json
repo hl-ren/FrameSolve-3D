@@ -1,0 +1,369 @@
+{
+  "app": "FrameSolve 3D",
+  "version": "1.0",
+  "savedAt": "2026-05-21T23:01:57.278Z",
+  "unit": "cm",
+  "gridStep": 5,
+  "gridVisible": true,
+  "loadZ": -15000,
+  "offset": {
+    "dx": 5,
+    "dy": 0,
+    "dz": 0
+  },
+  "coordinateNode": {
+    "x": 0,
+    "y": 0,
+    "z": 0
+  },
+  "defaultMaterialId": "wood",
+  "defaultSectionId": "timber100",
+  "model": {
+    "nodes": [
+      {
+        "id": "N1",
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      {
+        "id": "N2",
+        "x": 10,
+        "y": 0,
+        "z": 0
+      },
+      {
+        "id": "N3",
+        "x": 10,
+        "y": 10,
+        "z": 0
+      },
+      {
+        "id": "N4",
+        "x": 0,
+        "y": 10,
+        "z": 0
+      },
+      {
+        "id": "N5",
+        "x": 0,
+        "y": 0,
+        "z": 10
+      },
+      {
+        "id": "N6",
+        "x": 10,
+        "y": 0,
+        "z": 10
+      },
+      {
+        "id": "N7",
+        "x": 10,
+        "y": 10,
+        "z": 10
+      },
+      {
+        "id": "N8",
+        "x": 0,
+        "y": 10,
+        "z": 10
+      },
+      {
+        "id": "N9",
+        "x": 15,
+        "y": 10,
+        "z": 10,
+        "joint": "hinged"
+      }
+    ],
+    "elements": [
+      {
+        "id": "E1",
+        "type": "bar3d",
+        "startNodeId": "N1",
+        "endNodeId": "N2",
+        "materialId": "wood",
+        "sectionId": "timber100"
+      },
+      {
+        "id": "E2",
+        "type": "bar3d",
+        "startNodeId": "N2",
+        "endNodeId": "N3",
+        "materialId": "wood",
+        "sectionId": "timber100"
+      },
+      {
+        "id": "E3",
+        "type": "bar3d",
+        "startNodeId": "N3",
+        "endNodeId": "N4",
+        "materialId": "wood",
+        "sectionId": "timber100"
+      },
+      {
+        "id": "E4",
+        "type": "bar3d",
+        "startNodeId": "N4",
+        "endNodeId": "N1",
+        "materialId": "wood",
+        "sectionId": "timber100"
+      },
+      {
+        "id": "E5",
+        "type": "bar3d",
+        "startNodeId": "N5",
+        "endNodeId": "N6",
+        "materialId": "wood",
+        "sectionId": "timber100"
+      },
+      {
+        "id": "E6",
+        "type": "bar3d",
+        "startNodeId": "N6",
+        "endNodeId": "N7",
+        "materialId": "wood",
+        "sectionId": "timber100"
+      },
+      {
+        "id": "E7",
+        "type": "bar3d",
+        "startNodeId": "N7",
+        "endNodeId": "N8",
+        "materialId": "wood",
+        "sectionId": "timber100"
+      },
+      {
+        "id": "E8",
+        "type": "bar3d",
+        "startNodeId": "N8",
+        "endNodeId": "N5",
+        "materialId": "wood",
+        "sectionId": "timber100"
+      },
+      {
+        "id": "E9",
+        "type": "bar3d",
+        "startNodeId": "N1",
+        "endNodeId": "N5",
+        "materialId": "wood",
+        "sectionId": "timber100"
+      },
+      {
+        "id": "E10",
+        "type": "bar3d",
+        "startNodeId": "N2",
+        "endNodeId": "N6",
+        "materialId": "wood",
+        "sectionId": "timber100"
+      },
+      {
+        "id": "E11",
+        "type": "bar3d",
+        "startNodeId": "N3",
+        "endNodeId": "N7",
+        "materialId": "wood",
+        "sectionId": "timber100"
+      },
+      {
+        "id": "E12",
+        "type": "bar3d",
+        "startNodeId": "N4",
+        "endNodeId": "N8",
+        "materialId": "wood",
+        "sectionId": "timber100"
+      },
+      {
+        "id": "E13",
+        "type": "bar3d",
+        "startNodeId": "N1",
+        "endNodeId": "N3",
+        "materialId": "wood",
+        "sectionId": "timber100"
+      },
+      {
+        "id": "E14",
+        "type": "bar3d",
+        "startNodeId": "N5",
+        "endNodeId": "N7",
+        "materialId": "wood",
+        "sectionId": "timber100"
+      },
+      {
+        "id": "E15",
+        "type": "bar3d",
+        "startNodeId": "N1",
+        "endNodeId": "N6",
+        "materialId": "wood",
+        "sectionId": "timber100"
+      },
+      {
+        "id": "E16",
+        "type": "bar3d",
+        "startNodeId": "N2",
+        "endNodeId": "N7",
+        "materialId": "wood",
+        "sectionId": "timber100"
+      },
+      {
+        "id": "E17",
+        "type": "bar3d",
+        "startNodeId": "N3",
+        "endNodeId": "N8",
+        "materialId": "wood",
+        "sectionId": "timber100"
+      },
+      {
+        "id": "E18",
+        "type": "bar3d",
+        "startNodeId": "N4",
+        "endNodeId": "N5",
+        "materialId": "wood",
+        "sectionId": "timber100"
+      },
+      {
+        "id": "E19",
+        "type": "beam3d",
+        "startNodeId": "N7",
+        "endNodeId": "N9",
+        "materialId": "wood",
+        "sectionId": "timber100"
+      },
+      {
+        "id": "E20",
+        "type": "beam3d",
+        "startNodeId": "N6",
+        "endNodeId": "N9",
+        "materialId": "wood",
+        "sectionId": "timber100"
+      },
+      {
+        "id": "E21",
+        "type": "beam3d",
+        "startNodeId": "N2",
+        "endNodeId": "N9",
+        "materialId": "wood",
+        "sectionId": "timber100"
+      }
+    ],
+    "materials": [
+      {
+        "id": "wood",
+        "name": "Wood",
+        "E": 11000000000,
+        "G": 690000000,
+        "density": 500
+      },
+      {
+        "id": "glulam",
+        "name": "Glulam",
+        "E": 12500000000,
+        "G": 780000000,
+        "density": 540
+      },
+      {
+        "id": "steel",
+        "name": "Steel",
+        "E": 206000000000,
+        "G": 79000000000,
+        "density": 7850
+      },
+      {
+        "id": "concrete",
+        "name": "Concrete",
+        "E": 30000000000,
+        "G": 12500000000,
+        "density": 2500
+      }
+    ],
+    "sections": [
+      {
+        "id": "timber100",
+        "name": "Timber 100x100",
+        "A": 0.01,
+        "Iy": 0.000008333,
+        "Iz": 0.000008333,
+        "J": 0.000014
+      },
+      {
+        "id": "timber50x100",
+        "name": "Timber 50x100",
+        "A": 0.005,
+        "Iy": 0.000004167,
+        "Iz": 0.000001042,
+        "J": 0.0000028
+      },
+      {
+        "id": "timber100x200",
+        "name": "Timber 100x200",
+        "A": 0.02,
+        "Iy": 0.00006667,
+        "Iz": 0.00001667,
+        "J": 0.000021
+      },
+      {
+        "id": "steelTube80",
+        "name": "Steel Tube 80x4",
+        "A": 0.000955,
+        "Iy": 7.2e-7,
+        "Iz": 7.2e-7,
+        "J": 0.00000144
+      }
+    ],
+    "boundaries": [
+      {
+        "nodeId": "N1",
+        "ux": true,
+        "uy": true,
+        "uz": true
+      },
+      {
+        "nodeId": "N2",
+        "ux": true,
+        "uy": true,
+        "uz": true
+      },
+      {
+        "nodeId": "N3",
+        "ux": true,
+        "uy": true,
+        "uz": true
+      },
+      {
+        "nodeId": "N4",
+        "ux": true,
+        "uy": true,
+        "uz": true
+      }
+    ],
+    "loads": [
+      {
+        "nodeId": "N5",
+        "fz": -15000
+      },
+      {
+        "nodeId": "N7",
+        "fz": -15000
+      },
+      {
+        "nodeId": "N8",
+        "fz": -15000
+      },
+      {
+        "nodeId": "N6",
+        "fz": -15000
+      },
+      {
+        "nodeId": "N9",
+        "fz": -15000
+      }
+    ],
+    "elementLoads": [],
+    "nodalMasses": [
+      {
+        "nodeId": "N6",
+        "mass": 100
+      }
+    ]
+  }
+}
