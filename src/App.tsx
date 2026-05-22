@@ -1239,6 +1239,7 @@ function App() {
     associateProfessor: en ? "Associate Professor, College of Civil Engineering" : "土木学院副教授",
     author: en ? "Author" : "作者",
     email: en ? "Email" : "邮箱",
+    scholar: en ? "Google Scholar" : "谷歌学术",
     language: en ? "Language" : "语言",
     chinese: "中文",
     english: "English",
@@ -1272,10 +1273,23 @@ function App() {
     setUndoCount(historyRef.current.length);
   }, []);
 
+  const clearSelection = useCallback(() => {
+    setSelectedNode(null);
+    setSelectedElement(null);
+    setPendingNode(null);
+    setHoverInfo(null);
+  }, []);
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       const isEditable = target?.tagName === "INPUT" || target?.tagName === "TEXTAREA" || target?.tagName === "SELECT" || target?.isContentEditable;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        if (isEditable) target?.blur();
+        clearSelection();
+        return;
+      }
       if (isEditable) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z" && !event.shiftKey) {
         event.preventDefault();
@@ -1284,7 +1298,7 @@ function App() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [undo]);
+  }, [clearSelection, undo]);
 
   const runSolve = () => {
     const scaleError = solveScaleError(model, "static", language);
@@ -1743,9 +1757,19 @@ function App() {
         setPendingNode(null);
         return;
       }
-      if (!gridVisible) return;
+      if (!gridVisible) {
+        setSelectedNode(null);
+        setSelectedElement(null);
+        setPendingNode(null);
+        return;
+      }
       const snappedPoint = closestGridPointToRay(raycaster.ray, gridPoints, currentUnitScale, pickRadius);
-      if (!snappedPoint) return;
+      if (!snappedPoint) {
+        setSelectedNode(null);
+        setSelectedElement(null);
+        setPendingNode(null);
+        return;
+      }
       const id = findOrCreateNode(snappedPoint);
       setSelectedNode(id);
       setSelectedElement(null);
@@ -2274,6 +2298,7 @@ function App() {
                   <div><dt>{text.title}</dt><dd>{text.associateProfessor}</dd></div>
                   <div><dt>{text.author}</dt><dd>{en ? "Huilong Ren" : "任辉龙"}</dd></div>
                   <div><dt>{text.email}</dt><dd><a href="mailto:hlren@tongji.edu.cn">hlren@tongji.edu.cn</a></dd></div>
+                  <div><dt>{text.scholar}</dt><dd><a href="https://scholar.google.com/citations?user=Rsr_KWIAAAAJ&hl=en" target="_blank" rel="noreferrer">scholar.google.com</a></dd></div>
                   <div><dt>Version</dt><dd>1.0</dd></div>
                 </dl>
               </section>

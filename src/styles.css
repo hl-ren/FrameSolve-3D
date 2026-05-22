@@ -1,9 +1,7 @@
 :root {
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color: #18212f;
   background: #f6f8fb;
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
 }
 
 * {
@@ -21,7 +19,7 @@ input {
 
 .app {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 360px;
+  grid-template-columns: minmax(0, 1fr) 348px;
   min-height: 100vh;
 }
 
@@ -134,10 +132,10 @@ input {
 .sidebar {
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  gap: 7px;
   height: 100vh;
   overflow: auto;
-  padding: 12px;
+  padding: 10px;
   border-left: 1px solid #d9e0ea;
   background: #ffffff;
 }
@@ -172,12 +170,12 @@ input {
 .languageSwitch {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 6px;
+  gap: 5px;
 }
 
 .languageSwitch button {
-  min-height: 30px;
-  padding: 0 8px;
+  min-height: 27px;
+  padding: 0 7px;
   border: 1px solid #d8e0ea;
   border-radius: 7px;
   background: #f8fafc;
@@ -199,20 +197,28 @@ input {
 .toolbar {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 6px;
+  gap: 5px;
 }
 
 button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
-  min-height: 30px;
+  min-width: 0;
+  gap: 4px;
+  min-height: 28px;
+  padding: 0 7px;
   border: 1px solid #cfd8e3;
   border-radius: 7px;
   background: #ffffff;
   color: #243044;
   cursor: pointer;
+  font-size: 12px;
+  line-height: 1.15;
+}
+
+button svg {
+  flex: 0 0 auto;
 }
 
 button:hover {
@@ -232,20 +238,20 @@ button:disabled {
 }
 
 .iconButton {
-  width: 32px;
-  min-height: 32px;
+  width: 29px;
+  min-height: 29px;
   padding: 0;
 }
 
 .stats {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
+  gap: 5px;
 }
 
 .stats span {
   min-width: 0;
-  padding: 6px 8px;
+  padding: 5px 6px;
   border: 1px solid #dbe3ee;
   border-radius: 8px;
   background: #f8fafc;
@@ -259,8 +265,8 @@ button:disabled {
 
 .panel {
   display: grid;
-  gap: 7px;
-  padding-top: 8px;
+  gap: 5px;
+  padding-top: 6px;
   border-top: 1px solid #e5eaf1;
 }
 
@@ -273,7 +279,7 @@ button:disabled {
 }
 
 .compactPanel {
-  gap: 6px;
+  gap: 5px;
 }
 
 .collapsiblePanel {
@@ -305,8 +311,8 @@ button:disabled {
 
 .panelBody {
   display: grid;
-  gap: 7px;
-  padding-top: 7px;
+  gap: 5px;
+  padding-top: 5px;
 }
 
 .rangeField {
@@ -339,7 +345,7 @@ button:disabled {
 .segmented {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 5px;
+  gap: 4px;
 }
 
 .segmented.twoSegment {
@@ -347,7 +353,7 @@ button:disabled {
 }
 
 .segmented button {
-  min-height: 28px;
+  min-height: 26px;
 }
 
 .selectionText {
@@ -396,8 +402,8 @@ button:disabled {
 .numberField input {
   width: 100%;
   min-width: 0;
-  min-height: 28px;
-  padding: 4px 7px;
+  min-height: 26px;
+  padding: 3px 6px;
   border: 1px solid #cfd8e3;
   border-radius: 8px;
 }
@@ -418,8 +424,8 @@ button:disabled {
 .selectField input {
   width: 100%;
   min-width: 0;
-  min-height: 30px;
-  padding: 4px 7px;
+  min-height: 28px;
+  padding: 3px 6px;
   border: 1px solid #cfd8e3;
   border-radius: 8px;
   background: #ffffff;
@@ -434,11 +440,11 @@ button:disabled {
 .dofGrid {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 5px;
+  gap: 4px;
 }
 
 .dofGrid button {
-  min-height: 28px;
+  min-height: 25px;
   padding: 0;
   font-size: 12px;
 }
@@ -500,7 +506,7 @@ button:disabled {
 .actions {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
+  gap: 5px;
 }
 
 .error {
