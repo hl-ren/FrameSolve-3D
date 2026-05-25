@@ -19,7 +19,7 @@ input {
 
 .app {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 348px;
+  grid-template-columns: minmax(0, 1fr) 336px;
   min-height: 100vh;
 }
 
@@ -132,10 +132,10 @@ input {
 .sidebar {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 5px;
   height: 100vh;
   overflow: auto;
-  padding: 10px;
+  padding: 8px;
   border-left: 1px solid #d9e0ea;
   background: #ffffff;
 }
@@ -164,7 +164,7 @@ input {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 6px;
+  gap: 4px;
 }
 
 .languageSwitch {
@@ -196,8 +196,8 @@ input {
 
 .toolbar {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 5px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 4px;
 }
 
 button {
@@ -205,9 +205,9 @@ button {
   align-items: center;
   justify-content: center;
   min-width: 0;
-  gap: 4px;
-  min-height: 28px;
-  padding: 0 7px;
+  gap: 3px;
+  min-height: 26px;
+  padding: 0 6px;
   border: 1px solid #cfd8e3;
   border-radius: 7px;
   background: #ffffff;
@@ -238,8 +238,8 @@ button:disabled {
 }
 
 .iconButton {
-  width: 29px;
-  min-height: 29px;
+  width: 27px;
+  min-height: 27px;
   padding: 0;
 }
 
@@ -265,8 +265,8 @@ button:disabled {
 
 .panel {
   display: grid;
-  gap: 5px;
-  padding-top: 6px;
+  gap: 4px;
+  padding-top: 5px;
   border-top: 1px solid #e5eaf1;
 }
 
@@ -275,7 +275,7 @@ button:disabled {
   align-items: center;
   gap: 6px;
   margin: 0;
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .compactPanel {
@@ -335,6 +335,13 @@ button:disabled {
   grid-template-columns: minmax(0, 1fr) 32px;
   align-items: center;
   gap: 6px;
+}
+
+.gridInlineControls {
+  display: grid;
+  grid-template-columns: minmax(112px, 0.9fr) minmax(0, 1.1fr);
+  align-items: center;
+  gap: 5px;
 }
 
 .gridStepField > span {
@@ -410,7 +417,7 @@ button:disabled {
 
 .selectField {
   display: grid;
-  grid-template-columns: 78px minmax(0, 1fr);
+  grid-template-columns: 70px minmax(0, 1fr);
   align-items: center;
   gap: 5px;
 }
@@ -439,7 +446,7 @@ button:disabled {
 
 .dofGrid {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 4px;
 }
 
@@ -451,14 +458,14 @@ button:disabled {
 
 .boundaryValueGrid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(130px, 1fr));
-  gap: 6px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
 }
 
 .loadGrid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(130px, 1fr));
-  gap: 6px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
 }
 
 .loadList {
@@ -495,12 +502,12 @@ button:disabled {
 
 .offsetGrid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(130px, 1fr));
-  gap: 6px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
 }
 
 .panelBody .numberField {
-  grid-template-columns: 78px minmax(0, 1fr);
+  grid-template-columns: 70px minmax(0, 1fr);
 }
 
 .actions {
@@ -518,10 +525,67 @@ button:disabled {
   font-size: 13px;
 }
 
-.resultPanel p {
+.resultPopup {
+  position: fixed;
+  left: 14px;
+  bottom: 14px;
+  z-index: 18;
+  display: grid;
+  gap: 7px;
+  width: min(360px, calc(100vw - 374px));
+  max-height: min(46vh, 420px);
+  overflow: auto;
+  padding: 9px 10px 10px;
+  border: 1px solid rgba(36, 48, 68, 0.18);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 16px 42px rgba(24, 33, 47, 0.2);
+}
+
+.modalResultPopup {
+  width: min(245px, calc(100vw - 374px));
+  max-height: min(52vh, 430px);
+}
+
+.resultPopupHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: -3px -3px 0;
+  padding: 3px;
+  cursor: move;
+  touch-action: none;
+  user-select: none;
+}
+
+.resultPopupHeader strong {
+  font-size: 14px;
+}
+
+.resultPopup p {
   margin: 0;
   color: #475467;
   font-size: 13px;
+}
+
+.resultPopupControls {
+  display: grid;
+  grid-template-columns: minmax(0, auto) minmax(160px, 240px);
+  align-items: center;
+  gap: 6px;
+}
+
+.modalResultPopup .resultPopupControls {
+  grid-template-columns: 1fr;
+}
+
+.modalResultPopup .compactColorField {
+  grid-template-columns: 64px minmax(0, 1fr);
+}
+
+.compactColorField {
+  grid-template-columns: 68px minmax(0, 1fr);
 }
 
 .table {
@@ -553,8 +617,8 @@ button:disabled {
 }
 
 .modalTable .row {
-  grid-template-columns: 44px minmax(70px, 1fr) minmax(70px, 1fr);
-  min-width: 260px;
+  grid-template-columns: 40px minmax(78px, 1fr) minmax(70px, 1fr);
+  min-width: 0;
 }
 
 .modalTable .row button {
@@ -578,5 +642,21 @@ button:disabled {
     min-height: 44vh;
     border-left: 0;
     border-top: 1px solid #d9e0ea;
+  }
+
+  .resultPopup {
+    left: 10px;
+    right: 10px;
+    bottom: calc(44vh + 10px);
+    width: auto;
+    max-height: 34vh;
+  }
+
+  .modalResultPopup {
+    width: auto;
+  }
+
+  .resultPopupControls {
+    grid-template-columns: 1fr;
   }
 }

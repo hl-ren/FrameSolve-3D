@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { BoxSelect, ChevronDown, ChevronRight, CircleDot, CircleHelp, Eraser, Eye, EyeOff, FolderOpen, Hammer, Link2, Play, Plus, RefreshCcw, Save, Sigma, Trash2, Undo2, X } from "lucide-react";
+import { BoxSelect, ChevronDown, ChevronRight, CircleDot, CircleHelp, Eraser, Eye, EyeOff, FilePlus2, FolderOpen, Hammer, Link2, Play, Plus, RefreshCcw, Save, Sigma, Trash2, Undo2, X } from "lucide-react";
 import { solveModalAnalysis, solveStructure } from "./core/fem";
 import { type BoundaryCondition, type DofKey, dofKeys, type ElementForce, type ElementLoad, type ElementType, type LoadCoordinate, type Material, type ModalResult, type Section, type SolveResult, type StructureModel, type StructureNode, type Vec3 } from "./core/types";
 
-type Tool = "select" | "member" | "support" | "load";
+type Tool = "select" | "member" | "support" | "load" | "delete";
 type UnitKey = "m" | "cm" | "mm";
 type LanguageKey = "zh" | "en";
 type ExampleKey = "cube" | "bridge" | "tower" | "cantilever" | "orientalPearl" | "tongjiCivil";
@@ -113,6 +113,8 @@ const defaultGridBounds: GridBounds = {
   zMax: 10,
 };
 
+const memberSnapRatios = [1 / 3, 1 / 2, 2 / 3];
+
 function gridValues(min: number, max: number, step: number): number[] {
   const values: number[] = [];
   const start = Math.ceil(min / step) * step;
@@ -165,6 +167,30 @@ function closestGridPointToRay(ray: THREE.Ray, points: Vec3[], scale: number, pi
     }
   }
   return best;
+}
+
+function nearestMemberSnapRatio(hitPoint: THREE.Vector3, start: StructureNode, end: StructureNode, scale: number): number | null {
+  const a = new THREE.Vector3(start.x * scale, start.z * scale, start.y * scale);
+  const b = new THREE.Vector3(end.x * scale, end.z * scale, end.y * scale);
+  const ab = b.clone().sub(a);
+  const lengthSquared = ab.lengthSq();
+  if (lengthSquared < 1e-12) return null;
+  const ratio = THREE.MathUtils.clamp(hitPoint.clone().sub(a).dot(ab) / lengthSquared, 0, 1);
+  let bestRatio = memberSnapRatios[0];
+  let bestDistance = Math.abs(ratio - bestRatio);
+  for (const candidate of memberSnapRatios.slice(1)) {
+    const distance = Math.abs(ratio - candidate);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestRatio = candidate;
+    }
+  }
+  return bestDistance <= 0.12 ? bestRatio : null;
+}
+
+function memberSnapLabel(ratio: number): string {
+  if (Math.abs(ratio - 0.5) < 1e-6) return "1/2";
+  return ratio < 0.5 ? "1/3" : "2/3";
 }
 
 function createSpatialGridLineGeometry(xValues: number[], yValues: number[], zValues: number[], scale: number): THREE.BufferGeometry {
@@ -280,6 +306,12 @@ const emptyModel = (): StructureModel => ({
   loads: [],
   elementLoads: [],
   nodalMasses: [],
+});
+
+const newProjectModel = (): StructureModel => ({
+  ...emptyModel(),
+  nodes: [{ id: "N1", x: 0, y: 0, z: 0 }],
+  boundaries: [{ nodeId: "N1", ux: true, uy: true, uz: true, rx: true, ry: true, rz: true }],
 });
 
 function barElement(id: string, startNodeId: string, endNodeId: string, sectionId = "timber100"): StructureModel["elements"][number] {
@@ -966,6 +998,29 @@ function insertNodeAndSplit(model: StructureModel, node: StructureNode, fixedOnB
   return splitElementsAtNode(nextModel, node);
 }
 
+function deleteElementFromModel(model: StructureModel, elementId: string): StructureModel {
+  return {
+    ...model,
+    elements: model.elements.filter((element) => element.id !== elementId),
+    elementLoads: (model.elementLoads ?? []).filter((load) => load.elementId !== elementId),
+  };
+}
+
+function deleteNodeFromModel(model: StructureModel, nodeId: string): StructureModel {
+  const removedElementIds = new Set(model.elements
+    .filter((element) => element.startNodeId === nodeId || element.endNodeId === nodeId)
+    .map((element) => element.id));
+  return {
+    ...model,
+    nodes: model.nodes.filter((node) => node.id !== nodeId),
+    elements: model.elements.filter((element) => !removedElementIds.has(element.id)),
+    boundaries: model.boundaries.filter((boundary) => boundary.nodeId !== nodeId),
+    loads: model.loads.filter((load) => load.nodeId !== nodeId),
+    nodalMasses: (model.nodalMasses ?? []).filter((mass) => mass.nodeId !== nodeId),
+    elementLoads: (model.elementLoads ?? []).filter((load) => !removedElementIds.has(load.elementId)),
+  };
+}
+
 function isUnitKey(value: unknown): value is UnitKey {
   return value === "m" || value === "cm" || value === "mm";
 }
@@ -1087,6 +1142,8 @@ function App() {
   const [language, setLanguage] = useState<LanguageKey>("zh");
   const [result, setResult] = useState<SolveResult | null>(null);
   const [modalResult, setModalResult] = useState<ModalResult | null>(null);
+  const [resultPopupOpen, setResultPopupOpen] = useState(false);
+  const [resultPopupPosition, setResultPopupPosition] = useState({ x: 14, y: 0 });
   const [error, setError] = useState<string | null>(null);
   const [hoverInfo, setHoverInfo] = useState<HoverInfo | null>(null);
   const [activeMode, setActiveMode] = useState(1);
@@ -1115,6 +1172,7 @@ function App() {
   const modalDeformScaleRef = useRef(modalDeformScale);
   const sceneDirtyRef = useRef(true);
   const historyRef = useRef<StructureModel[]>([]);
+  const resultPopupDragRef = useRef<{ startX: number; startY: number; originX: number; originY: number } | null>(null);
   const [undoCount, setUndoCount] = useState(0);
 
   useEffect(() => { modelRef.current = model; }, [model]);
@@ -1167,6 +1225,7 @@ function App() {
     nodes: en ? "Nodes" : "节点",
     elements: en ? "Elements" : "单元",
     selected: en ? "Selected" : "选中",
+    deleting: en ? "Deleting" : "删除模式",
     start: en ? "Start" : "起点",
     pickGrid: en ? "Pick spatial grid" : "拾取空间 grid",
     examples: en ? "Examples" : "典型模型",
@@ -1180,7 +1239,9 @@ function App() {
     barElement: en ? "Bar element" : "杆单元",
     beamElement: en ? "Beam element" : "梁单元",
     autoClassify: en ? "Auto classify elements" : "自动判定单元",
-    deleteSelected: en ? "Delete selection" : "删除选中",
+    deleteSelected: en ? "Delete" : "删除",
+    deleteMode: en ? "Click nodes or members to delete; press Esc or Delete again to stop." : "点击节点或梁杆连续删除；按 Esc 或再次点击删除退出。",
+    newProject: en ? "New project" : "新建项目",
     beamLoad: en ? "Beam load" : "梁荷载",
     point: en ? "Point" : "集中",
     distributed: en ? "Distributed" : "均布",
@@ -1219,6 +1280,8 @@ function App() {
     solve: en ? "Solve" : "求解",
     frequency: en ? "Frequency" : "频率",
     clear: en ? "Clear" : "清空",
+    close: en ? "Close" : "关闭",
+    resultTable: en ? "Result table" : "结果表",
     results: en ? "Results" : "结果",
     maxDisplacement: en ? "Max displacement" : "最大位移",
     forceUnit: en ? "Force" : "力",
@@ -1278,6 +1341,66 @@ function App() {
     setSelectedElement(null);
     setPendingNode(null);
     setHoverInfo(null);
+    setTool((current) => current === "delete" ? "select" : current);
+  }, []);
+
+  const startResultPopupDrag = (event: React.PointerEvent<HTMLElement>) => {
+    const target = event.target as HTMLElement;
+    if (target.closest("button")) return;
+    const popup = event.currentTarget.closest(".resultPopup");
+    const rect = popup?.getBoundingClientRect();
+    resultPopupDragRef.current = {
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: rect?.left ?? resultPopupPosition.x,
+      originY: rect?.top ?? resultPopupPosition.y,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const dragResultPopup = (event: React.PointerEvent<HTMLElement>) => {
+    const drag = resultPopupDragRef.current;
+    if (!drag) return;
+    const popup = event.currentTarget.closest(".resultPopup");
+    const rect = popup?.getBoundingClientRect();
+    const maxX = Math.max(0, window.innerWidth - (rect?.width ?? 320));
+    const maxY = Math.max(0, window.innerHeight - (rect?.height ?? 160));
+    setResultPopupPosition({
+      x: Math.max(0, Math.min(maxX, drag.originX + event.clientX - drag.startX)),
+      y: Math.max(0, Math.min(maxY, drag.originY + event.clientY - drag.startY)),
+    });
+  };
+
+  const stopResultPopupDrag = (event: React.PointerEvent<HTMLElement>) => {
+    if (!resultPopupDragRef.current) return;
+    resultPopupDragRef.current = null;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+  };
+
+  useEffect(() => {
+    const move = (event: PointerEvent) => {
+      const drag = resultPopupDragRef.current;
+      if (!drag) return;
+      const popup = document.querySelector(".resultPopup");
+      const rect = popup?.getBoundingClientRect();
+      const maxX = Math.max(0, window.innerWidth - (rect?.width ?? 320));
+      const maxY = Math.max(0, window.innerHeight - (rect?.height ?? 160));
+      setResultPopupPosition({
+        x: Math.max(0, Math.min(maxX, drag.originX + event.clientX - drag.startX)),
+        y: Math.max(0, Math.min(maxY, drag.originY + event.clientY - drag.startY)),
+      });
+    };
+    const stop = () => {
+      resultPopupDragRef.current = null;
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+    window.addEventListener("pointercancel", stop);
+    return () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+      window.removeEventListener("pointercancel", stop);
+    };
   }, []);
 
   useEffect(() => {
@@ -1312,6 +1435,7 @@ function App() {
     try {
       const solved = solveStructure(convertModelToMeters(model, currentUnitScale));
       setResult(solved);
+      setResultPopupOpen(false);
       setModalResult(null);
       setActiveMode(1);
       setModalAnimate(false);
@@ -1336,6 +1460,7 @@ function App() {
       const modeCount = Math.max(1, Math.min(24, Math.round(modalModeCount)));
       const solved = solveModalAnalysis(convertModelToMeters(model, currentUnitScale), modeCount);
       setModalResult(solved);
+      setResultPopupOpen(true);
       setActiveMode(solved.modes[0]?.mode ?? 1);
       setModalAnimate(false);
       setResult(null);
@@ -1550,7 +1675,6 @@ function App() {
       const displacementScale = (solved?.maxDisplacement ? Math.min(200, 1.8 / solved.maxDisplacement) : 1) * Math.max(0, staticDeformScaleRef.current);
       const forceMap = new Map(solved?.elementForces.map((force) => [force.elementId, force]));
       const maxAxial = Math.max(1, ...(solved?.elementForces.map((force) => Math.abs(force.axial)) ?? [0]));
-
       for (const element of current.elements) {
         const a = nodeMap.get(element.startNodeId);
         const b = nodeMap.get(element.endNodeId);
@@ -1663,12 +1787,63 @@ function App() {
       const id = nextId("N", modelRef.current.nodes.map((node) => node.id));
       const next = insertNodeAndSplit(modelRef.current, { id, x, y, z }, Math.abs(z) < 1e-9);
       saveHistory();
+      modelRef.current = next.model;
       setModel(next.model);
+      setResult(null);
+      setModalResult(null);
       if (next.droppedLoadCount > 0) {
         setError(languageRef.current === "en"
           ? "The inserted node split a member; existing beam loads on the original member were removed. Please set them again."
           : "插入节点已分割构件；原构件梁荷载已移除，请重新设置。");
+      } else {
+        setError(null);
       }
+      return id;
+    };
+
+    const findOrCreateMemberSnapNode = (elementId: string, ratio: number): string | null => {
+      const current = modelRef.current;
+      const element = current.elements.find((item) => item.id === elementId);
+      if (!element) return null;
+      const start = current.nodes.find((node) => node.id === element.startNodeId);
+      const end = current.nodes.find((node) => node.id === element.endNodeId);
+      if (!start || !end) return null;
+      const point = interpolateNode(start, end, ratio);
+      const target = {
+        id: "",
+        x: Number(point.x.toFixed(6)),
+        y: Number(point.y.toFixed(6)),
+        z: Number(point.z.toFixed(6)),
+      };
+      const existing = current.nodes.find((node) => samePoint(node, target));
+      if (existing) {
+        const inserted = insertNodeAndSplit(current, existing, false);
+        if (inserted.splitCount > 0) {
+          saveHistory();
+          modelRef.current = inserted.model;
+          setModel(inserted.model);
+          setResult(null);
+          setModalResult(null);
+        }
+        setError(inserted.droppedLoadCount > 0
+          ? (languageRef.current === "en"
+              ? "The inserted node split a member; existing beam loads on the original member were removed. Please set them again."
+              : "插入节点已分割构件；原构件梁荷载已移除，请重新设置。")
+          : null);
+        return existing.id;
+      }
+      const id = nextId("N", current.nodes.map((node) => node.id));
+      const inserted = insertNodeAndSplit(current, { ...target, id }, Math.abs(target.z) < 1e-9);
+      saveHistory();
+      modelRef.current = inserted.model;
+      setModel(inserted.model);
+      setResult(null);
+      setModalResult(null);
+      setError(inserted.droppedLoadCount > 0
+        ? (languageRef.current === "en"
+            ? "The inserted node split a member; existing beam loads on the original member were removed. Please set them again."
+            : "插入节点已分割构件；原构件梁荷载已移除，请重新设置。")
+        : null);
       return id;
     };
 
@@ -1705,6 +1880,13 @@ function App() {
       const end = nodeMap.get(element.endNodeId);
       const force = resultRef.current?.elementForces.find((item) => item.elementId === elementId);
       const hoverLanguage = languageRef.current;
+      const snapRatio = start && end ? nearestMemberSnapRatio(hit.point, start, end, currentUnitScale) : null;
+      const deleteLine = toolRef.current === "delete"
+        ? (hoverLanguage === "en" ? "Click to delete" : "点击删除")
+        : "";
+      const snapLine = snapRatio !== null && toolRef.current !== "select" && toolRef.current !== "delete"
+        ? (hoverLanguage === "en" ? `Pick ${memberSnapLabel(snapRatio)} to split member` : `拾取 ${memberSnapLabel(snapRatio)} 点分割梁杆`)
+        : "";
       const lines = force
         ? [
             `${forceStatus(force, hoverLanguage)} ${elementTypeLabel(elementVisualKind(element, nodeMap), hoverLanguage)} ${elementId}`,
@@ -1713,10 +1895,14 @@ function App() {
             force.shearZ !== undefined ? `Vz ${format(force.shearZ)}` : "",
             force.momentYStart !== undefined ? `My ${formatMomentPair(force.momentYStart, force.momentYEnd, unitRef.current)} ${momentUnit(unitRef.current)}` : "",
             force.momentZStart !== undefined ? `Mz ${formatMomentPair(force.momentZStart, force.momentZEnd, unitRef.current)} ${momentUnit(unitRef.current)}` : "",
+            deleteLine,
+            snapLine,
           ].filter(Boolean)
         : [
             `${elementTypeLabel(elementVisualKind(element, nodeMap), hoverLanguage)} ${elementId}`,
             start && end ? `L ${format(nodeDistance(start, end))} ${unitLabels[unitRef.current]}` : "",
+            deleteLine,
+            snapLine,
             hoverLanguage === "en" ? "Internal forces appear after solving" : "求解后显示内力",
           ].filter(Boolean);
       updateHover({ elementId, x: event.clientX, y: event.clientY, lines });
@@ -1739,12 +1925,58 @@ function App() {
       const nodeHits = raycaster.intersectObjects(nodePickTargets).filter((hit) => hit.object.userData.nodeId);
       if (nodeHits[0]) {
         const id = nodeHits[0].object.userData.nodeId as string;
+        if (toolRef.current === "delete") {
+          saveHistory();
+          const next = deleteNodeFromModel(modelRef.current, id);
+          modelRef.current = next;
+          setModel(next);
+          setSelectedNode(null);
+          setSelectedElement(null);
+          setPendingNode(null);
+          setResult(null);
+          setModalResult(null);
+          setError(null);
+          updateHover(null);
+          return;
+        }
         setSelectedNode(id);
         setSelectedElement(null);
         handleNodeAction(id);
         return;
       }
       const memberHit = raycaster.intersectObjects(memberPickTargets)[0];
+      if (memberHit?.object.userData.elementId && toolRef.current === "delete") {
+        const elementId = memberHit.object.userData.elementId as string;
+        saveHistory();
+        const next = deleteElementFromModel(modelRef.current, elementId);
+        modelRef.current = next;
+        setModel(next);
+        setSelectedNode(null);
+        setSelectedElement(null);
+        setPendingNode(null);
+        setResult(null);
+        setModalResult(null);
+        setError(null);
+        updateHover(null);
+        return;
+      }
+      if (memberHit?.object.userData.elementId && toolRef.current !== "select") {
+        const elementId = memberHit.object.userData.elementId as string;
+        const current = modelRef.current;
+        const element = current.elements.find((item) => item.id === elementId);
+        const start = element ? current.nodes.find((node) => node.id === element.startNodeId) : null;
+        const end = element ? current.nodes.find((node) => node.id === element.endNodeId) : null;
+        const snapRatio = start && end ? nearestMemberSnapRatio(memberHit.point, start, end, currentUnitScale) : null;
+        if (snapRatio !== null) {
+          const id = findOrCreateMemberSnapNode(elementId, snapRatio);
+          if (id) {
+            setSelectedNode(id);
+            setSelectedElement(null);
+            handleNodeAction(id);
+            return;
+          }
+        }
+      }
       if (memberHit?.object.userData.elementId && toolRef.current === "select") {
         setSelectedElement(memberHit.object.userData.elementId as string);
         setSelectedNode(null);
@@ -2051,35 +2283,67 @@ function App() {
     setError(null);
   };
 
+  const createNewProject = () => {
+    const nextModel = newProjectModel();
+    saveHistory();
+    setModel(nextModel);
+    setDefaultMaterialId("wood");
+    setDefaultSectionId("timber100");
+    setSelectedNode("N1");
+    setSelectedElement(null);
+    setPendingNode(null);
+    setTool("member");
+    setUnit("cm");
+    setGridStep(defaultGridStepByUnit.cm);
+    setGridVisible(true);
+    setOffset({ dx: defaultGridStepByUnit.cm, dy: 0, dz: 0 });
+    setCoordinateNode({ x: 0, y: 0, z: 0 });
+    setLoadZ(-15000);
+    setLoadDraft({ fx: 0, fy: 0, fz: -15000 });
+    setResult(null);
+    setModalResult(null);
+    setActiveMode(1);
+    setModalAnimate(false);
+    setError(null);
+  };
+
   const deleteSelection = () => {
     if (!selectedNode && !selectedElement) return;
+    const previousTool = tool;
     saveHistory();
     if (selectedElement) {
-      setModel((current) => ({
-        ...current,
-        elements: current.elements.filter((element) => element.id !== selectedElement),
-        elementLoads: (current.elementLoads ?? []).filter((load) => load.elementId !== selectedElement),
-      }));
+      setModel((current) => deleteElementFromModel(current, selectedElement));
       setSelectedElement(null);
+      setPendingNode(null);
+      setTool(previousTool === "delete" ? "select" : previousTool);
       setResult(null);
+      setModalResult(null);
+      setError(null);
       return;
     }
     if (!selectedNode) return;
-    setModel((current) => ({
-      ...current,
-      nodes: current.nodes.filter((node) => node.id !== selectedNode),
-      elements: current.elements.filter((element) => element.startNodeId !== selectedNode && element.endNodeId !== selectedNode),
-      boundaries: current.boundaries.filter((boundary) => boundary.nodeId !== selectedNode),
-      loads: current.loads.filter((load) => load.nodeId !== selectedNode),
-      nodalMasses: (current.nodalMasses ?? []).filter((mass) => mass.nodeId !== selectedNode),
-      elementLoads: (current.elementLoads ?? []).filter((load) => {
-        const element = current.elements.find((item) => item.id === load.elementId);
-        return element && element.startNodeId !== selectedNode && element.endNodeId !== selectedNode;
-      }),
-    }));
+    setModel((current) => deleteNodeFromModel(current, selectedNode));
     setSelectedNode(null);
+    setSelectedElement(null);
     setPendingNode(null);
+    setTool(previousTool === "delete" ? "select" : previousTool);
     setResult(null);
+    setModalResult(null);
+    setError(null);
+  };
+
+  const toggleDeleteMode = () => {
+    if (selectedNode || selectedElement) {
+      deleteSelection();
+      return;
+    }
+    if (tool === "delete") {
+      setTool("select");
+      setPendingNode(null);
+      return;
+    }
+    setTool("delete");
+    setPendingNode(null);
   };
 
   const addElementLoad = () => {
@@ -2289,7 +2553,7 @@ function App() {
                 <h3>{text.productGuide}</h3>
                 <p>{en ? "FrameSolve 3D is a fast 3D frame/truss modeling, solving, and result visualization tool. New members are bars by default; switch to beam elements when bending, shear, member loads, or rigid-frame behavior is needed." : "FrameSolve 3D 用于三维杆系/桁架优先的快速建模、求解与结果查看。默认新建杆单元；需要弯矩、剪力、梁荷载或刚接框架时，可将单元切换为梁单元。"}</p>
                 <p>{en ? "Built-in examples carry their own unit systems. When loaded, coordinates are inserted 1:1 in that unit and the grid spacing switches automatically. Materials and sections can be selected as defaults before creating members." : "典型模型带有自己的单位系统，加载时会按该单位 1:1 放入模型并自动切换 grid 间距。材料与截面可先设为默认标签，再用于后续新建杆件。"}</p>
-                <p>{en ? "Supports spatial grid picking, coordinate-based node creation, offset creation, member splitting, nodal constraints and loads, point masses, project save/load, and Ctrl+Z undo. After solving, axial force tension/compression colors, deformation, omega, frequency f, modal scale, and animated mode shapes are available." : "支持空间 grid 拾取、坐标新建、按偏移新建、构件中点自动分割、节点约束与荷载、集中质量、保存/读取项目、Ctrl+Z 撤销。求解后可显示轴力拉压颜色和变形；频率分析可选择阶数、显示 omega 与 f，调整模态 scale，并用动态振型查看不同模态。"}</p>
+                <p>{en ? "Supports spatial grid picking, member 1/3-midpoint-2/3 snap splitting, coordinate-based node creation, offset creation, nodal constraints and loads, point masses, project save/load, and Ctrl+Z undo. After solving, axial force tension/compression colors, deformation, omega, frequency f, modal scale, and animated mode shapes are available." : "支持空间 grid 拾取、梁杆 1/3-中点-2/3 拾取分割、坐标新建、按偏移新建、节点约束与荷载、集中质量、保存/读取项目、Ctrl+Z 撤销。求解后可显示轴力拉压颜色和变形；频率分析可选择阶数、显示 omega 与 f，调整模态 scale，并用动态振型查看不同模态。"}</p>
               </section>
               <section>
                 <h3>{text.authorInfo}</h3>
@@ -2306,6 +2570,49 @@ function App() {
           </section>
         </div>
       )}
+      {resultPopupOpen && modalResult && (
+        <section
+          className="resultPopup modalResultPopup"
+          style={{
+            left: resultPopupPosition.x,
+            bottom: resultPopupPosition.y > 0 ? "auto" : 14,
+            top: resultPopupPosition.y > 0 ? resultPopupPosition.y : "auto",
+          }}
+          aria-label={text.resultTable}
+        >
+          <header
+            className="resultPopupHeader"
+            onPointerDown={startResultPopupDrag}
+            onPointerMove={dragResultPopup}
+            onPointerUp={stopResultPopupDrag}
+            onPointerCancel={stopResultPopupDrag}
+          >
+            <strong>{text.modal}</strong>
+            <button className="iconButton" onClick={() => setResultPopupOpen(false)} title={text.close}><X size={16} /></button>
+          </header>
+          <div className="resultPopupControls">
+            <button className={modalAnimate ? "active" : ""} onClick={() => setModalAnimate((value) => !value)}>
+              <Play size={16} />{modalAnimate ? text.stopAnimation : text.animate}
+            </button>
+            <label className="selectField colorField compactColorField">
+              <span>{text.lineColor}</span>
+              <input type="color" value={modalColor} onChange={(event) => setModalColor(event.target.value)} />
+            </label>
+          </div>
+          <div className="table modalTable">
+            <div className="row head"><span>{text.mode}</span><span>omega</span><span>f Hz</span></div>
+            {modalResult.modes.map((mode) => (
+              <div className="row" key={mode.mode}>
+                <button className={activeMode === mode.mode ? "active" : ""} onClick={() => setActiveMode(mode.mode)}>
+                  {mode.mode}
+                </button>
+                <span>{format(mode.omega)}</span>
+                <span>{format(mode.frequency)}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
       <aside className="sidebar">
         <header className="brand">
           <div>
@@ -2314,6 +2621,7 @@ function App() {
           </div>
           <div className="headerActions">
             <button className="iconButton" onClick={() => setHelpOpen(true)} title="Help"><CircleHelp size={18} /></button>
+            <button className="iconButton" onClick={createNewProject} title={text.newProject}><FilePlus2 size={18} /></button>
             <button className="iconButton" onClick={saveProject} title={text.saveProject}><Save size={18} /></button>
             <button className="iconButton" onClick={() => projectInputRef.current?.click()} title={text.loadProject}><FolderOpen size={18} /></button>
             <input
@@ -2348,12 +2656,13 @@ function App() {
           <button className={tool === "select" ? "active" : ""} onClick={() => setTool("select")} title={text.selectEdit}><BoxSelect size={17} />{text.select}</button>
           <button className={tool === "support" ? "active" : ""} onClick={() => setTool("support")} title={text.support}><Hammer size={17} />{text.support}</button>
           <button className={tool === "load" ? "active" : ""} onClick={() => setTool("load")} title={text.load}><CircleDot size={17} />{text.load}</button>
+          <button className={tool === "delete" ? "active" : ""} onClick={toggleDeleteMode} title={text.deleteSelected} disabled={tool !== "delete" && model.nodes.length === 0 && model.elements.length === 0}><Trash2 size={17} />{text.deleteSelected}</button>
         </div>
 
         <div className="stats">
           <span>{text.nodes} {model.nodes.length}</span>
           <span>{text.elements} {model.elements.length}</span>
-          <span>{selectedElement ? `${text.selected} ${selectedElement}` : pendingNode ? `${text.start} ${pendingNode}` : text.pickGrid}</span>
+          <span>{tool === "delete" ? text.deleting : selectedElement ? `${text.selected} ${selectedElement}` : pendingNode ? `${text.start} ${pendingNode}` : text.pickGrid}</span>
         </div>
 
         <section className="panel compactPanel">
@@ -2392,7 +2701,7 @@ function App() {
             </div>
           )}
           <button onClick={autoClassifyElements} disabled={model.elements.length === 0}><RefreshCcw size={17} />{text.autoClassify}</button>
-          <button onClick={deleteSelection} disabled={!selectedNode && !selectedElement}><Trash2 size={17} />{text.deleteSelected}</button>
+          {tool === "delete" && <p className="selectionText">{text.deleteMode}</p>}
         </section>
 
         {selectedElementData && (
@@ -2486,19 +2795,21 @@ function App() {
 
         <section className="panel compactPanel">
           <h2>{text.spatialGrid}</h2>
-          <button onClick={() => setGridVisible((visible) => !visible)}>
-            {gridVisible ? <EyeOff size={17} /> : <Eye size={17} />}
-            {gridVisible ? text.hideGrid : text.showGrid}
-          </button>
-          <div className="gridStepField">
-            <NumberField
-              label={text.spacing}
-              value={gridStep}
-              onChange={(value) => {
-                if (Number.isFinite(value) && value > 0) setGridStep(value);
-              }}
-            />
-            <span>{unitLabels[unit]}</span>
+          <div className="gridInlineControls">
+            <button onClick={() => setGridVisible((visible) => !visible)}>
+              {gridVisible ? <EyeOff size={17} /> : <Eye size={17} />}
+              {gridVisible ? text.hideGrid : text.showGrid}
+            </button>
+            <div className="gridStepField">
+              <NumberField
+                label={text.spacing}
+                value={gridStep}
+                onChange={(value) => {
+                  if (Number.isFinite(value) && value > 0) setGridStep(value);
+                }}
+              />
+              <span>{unitLabels[unit]}</span>
+            </div>
           </div>
         </section>
 
@@ -2588,52 +2899,6 @@ function App() {
 
         {error && <div className="error">{error}</div>}
 
-        {result && (
-          <section className="panel resultPanel">
-            <h2><Sigma size={17} />{text.results}</h2>
-            <p>{text.maxDisplacement}: {formatDisplacement(result.maxDisplacement, unit)}; {text.forceUnit}: N; {text.moment}: {momentUnit(unit)}</p>
-            <div className="table">
-              <div className="row head"><span>{text.element}</span><span>{text.status}</span><span>N</span><span>Vy</span><span>Vz</span><span>My i/j</span><span>Mz i/j</span></div>
-              {result.elementForces.map((force) => (
-                <div className="row" key={force.elementId}>
-                  <span>{force.elementId}</span>
-                  <span>{forceStatus(force, language)}</span>
-                  <span>{format(force.axial)}</span>
-                  <span>{format(force.shearY)}</span>
-                  <span>{format(force.shearZ)}</span>
-                  <span>{formatMomentPair(force.momentYStart, force.momentYEnd, unit)}</span>
-                  <span>{formatMomentPair(force.momentZStart, force.momentZEnd, unit)}</span>
-                </div>
-              ))}
-            </div>
-          </section>
-        )}
-
-        {modalResult && (
-          <section className="panel resultPanel">
-            <h2><Sigma size={17} />{text.modal}</h2>
-            <p>{text.modalDescription}</p>
-            <button className={modalAnimate ? "active" : ""} onClick={() => setModalAnimate((value) => !value)}>
-              <Play size={17} />{modalAnimate ? text.stopAnimation : text.animate}
-            </button>
-            <label className="selectField colorField">
-              <span>{text.lineColor}</span>
-              <input type="color" value={modalColor} onChange={(event) => setModalColor(event.target.value)} />
-            </label>
-            <div className="table modalTable">
-              <div className="row head"><span>{text.mode}</span><span>omega</span><span>f Hz</span></div>
-              {modalResult.modes.map((mode) => (
-                <div className="row" key={mode.mode}>
-                  <button className={activeMode === mode.mode ? "active" : ""} onClick={() => setActiveMode(mode.mode)}>
-                    {mode.mode}
-                  </button>
-                  <span>{format(mode.omega)}</span>
-                  <span>{format(mode.frequency)}</span>
-                </div>
-              ))}
-            </div>
-          </section>
-        )}
       </aside>
     </main>
   );
