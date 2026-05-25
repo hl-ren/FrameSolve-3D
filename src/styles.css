@@ -13,7 +13,8 @@ body {
 }
 
 button,
-input {
+input,
+textarea {
   font: inherit;
 }
 
@@ -339,9 +340,13 @@ button:disabled {
 
 .gridInlineControls {
   display: grid;
-  grid-template-columns: minmax(112px, 0.9fr) minmax(0, 1.1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: center;
   gap: 5px;
+}
+
+.gridInlineControls .gridStepField {
+  grid-column: 1 / -1;
 }
 
 .gridStepField > span {
@@ -508,6 +513,26 @@ button:disabled {
 
 .panelBody .numberField {
   grid-template-columns: 70px minmax(0, 1fr);
+}
+
+.scriptInput {
+  width: 100%;
+  min-height: 116px;
+  resize: vertical;
+  padding: 6px 7px;
+  border: 1px solid #cfd8e3;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #243044;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.sectionDimensionGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
 }
 
 .actions {

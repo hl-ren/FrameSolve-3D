@@ -22,6 +22,8 @@ export type Material = {
 export type Section = {
   id: string;
   name: string;
+  width?: number;
+  height?: number;
   A: number;
   Iy: number;
   Iz: number;

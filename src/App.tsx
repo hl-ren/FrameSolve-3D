@@ -98,9 +98,9 @@ const defaultMaterials: Material[] = [
 ];
 
 const defaultSections: Section[] = [
-  { id: "timber100", name: "Timber 100x100", A: 0.01, Iy: 8.333e-6, Iz: 8.333e-6, J: 1.4e-5 },
-  { id: "timber50x100", name: "Timber 50x100", A: 0.005, Iy: 4.167e-6, Iz: 1.042e-6, J: 2.8e-6 },
-  { id: "timber100x200", name: "Timber 100x200", A: 0.02, Iy: 6.667e-5, Iz: 1.667e-5, J: 2.1e-5 },
+  { id: "timber100", name: "Timber 100x100", width: 0.1, height: 0.1, A: 0.01, Iy: 8.333e-6, Iz: 8.333e-6, J: 1.667e-5 },
+  { id: "timber50x100", name: "Timber 50x100", width: 0.05, height: 0.1, A: 0.005, Iy: 4.167e-6, Iz: 1.042e-6, J: 5.208e-6 },
+  { id: "timber100x200", name: "Timber 100x200", width: 0.1, height: 0.2, A: 0.02, Iy: 6.667e-5, Iz: 1.667e-5, J: 8.333e-5 },
   { id: "steelTube80", name: "Steel Tube 80x4", A: 0.000955, Iy: 7.2e-7, Iz: 7.2e-7, J: 1.44e-6 },
 ];
 
@@ -1111,6 +1111,94 @@ function cloneModel(model: StructureModel): StructureModel {
   return JSON.parse(JSON.stringify(model)) as StructureModel;
 }
 
+function rectangularSectionFromDimensions(width: number, height: number): Pick<Section, "width" | "height" | "A" | "Iy" | "Iz" | "J"> {
+  const w = Math.max(0, width);
+  const h = Math.max(0, height);
+  const Iy = (w * h ** 3) / 12;
+  const Iz = (h * w ** 3) / 12;
+  return {
+    width: w,
+    height: h,
+    A: w * h,
+    Iy,
+    Iz,
+    J: Iy + Iz,
+  };
+}
+
+function normalizeNodeToken(token: string): string {
+  const text = token.trim();
+  return /^n/i.test(text) ? text.toUpperCase() : `N${text}`;
+}
+
+function normalizeElementToken(token: string): string {
+  const text = token.trim();
+  return /^e/i.test(text) ? text.toUpperCase() : `E${text}`;
+}
+
+function parseModelScript(script: string, template: StructureModel, materialId: string, sectionId: string): StructureModel {
+  const nodes: StructureNode[] = [];
+  const elements: StructureModel["elements"] = [];
+  let mode: "node" | "element" | null = null;
+
+  const parseNode = (parts: string[]) => {
+    if (parts.length < 4) throw new Error(`Invalid node line: ${parts.join(", ")}`);
+    const [idText, xText, yText, zText] = parts;
+    const x = Number(xText);
+    const y = Number(yText);
+    const z = Number(zText);
+    if (![x, y, z].every(Number.isFinite)) throw new Error(`Invalid node coordinate: ${parts.join(", ")}`);
+    nodes.push({ id: normalizeNodeToken(idText), x, y, z });
+  };
+
+  const parseElement = (parts: string[]) => {
+    if (parts.length < 3) throw new Error(`Invalid element line: ${parts.join(", ")}`);
+    const [idText, startText, endText] = parts;
+    elements.push({
+      id: normalizeElementToken(idText),
+      type: "bar3d",
+      startNodeId: normalizeNodeToken(startText),
+      endNodeId: normalizeNodeToken(endText),
+      materialId,
+      sectionId,
+    });
+  };
+
+  for (const rawLine of script.split(/\r?\n/)) {
+    const line = rawLine.replace(/#.*/, "").replace(/\/\/.*/, "").trim();
+    if (!line) continue;
+    const parts = line.split(/[\s,]+/).filter(Boolean);
+    const keyword = parts[0]?.toLowerCase();
+    if (keyword === "*node" || keyword === "*nodes") {
+      mode = "node";
+      if (parts.length > 1) throw new Error("*Node must be on its own line.");
+      continue;
+    }
+    if (keyword === "*element" || keyword === "*elements") {
+      mode = "element";
+      if (parts.length > 1) throw new Error("*Element must be on its own line.");
+      continue;
+    }
+    if (mode === "node") parseNode(parts);
+    else if (mode === "element") parseElement(parts);
+    else throw new Error(`Line must follow *Node or *Element: ${line}`);
+  }
+
+  if (nodes.length === 0) throw new Error("No nodes found in script.");
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const validElements = elements.filter((element) => nodeIds.has(element.startNodeId) && nodeIds.has(element.endNodeId));
+  if (validElements.length !== elements.length) throw new Error("Some elements reference missing nodes.");
+  return {
+    ...template,
+    nodes,
+    elements: validElements,
+    boundaries: nodes.filter((node) => Math.abs(node.z) < 1e-9).map((node) => ({ nodeId: node.id, ux: true, uy: true, uz: true })),
+    loads: [],
+    elementLoads: [],
+    nodalMasses: [],
+  };
+}
+
 function App() {
   const [model, setModel] = useState<StructureModel>(() => sampleModel());
   const [tool, setTool] = useState<Tool>("member");
@@ -1133,11 +1221,14 @@ function App() {
   const [coordinateNode, setCoordinateNode] = useState({ x: 0, y: 0, z: 0 });
   const [gridStep, setGridStep] = useState(defaultGridStepByUnit.cm);
   const [gridVisible, setGridVisible] = useState(true);
+  const [memberSnapVisible, setMemberSnapVisible] = useState(false);
   const [unit, setUnit] = useState<UnitKey>("cm");
   const [defaultMaterialId, setDefaultMaterialId] = useState("wood");
   const [defaultSectionId, setDefaultSectionId] = useState("timber100");
   const [sectionNameDraft, setSectionNameDraft] = useState("New section");
   const [materialOpen, setMaterialOpen] = useState(false);
+  const [scriptOpen, setScriptOpen] = useState(false);
+  const [scriptDraft, setScriptDraft] = useState("*Node\n1, 0, 0, 0\n2, 10, 0, 0\n3, 10, 10, 0\n*Element\n1, 1, 2\n2, 2, 3");
   const [helpOpen, setHelpOpen] = useState(false);
   const [language, setLanguage] = useState<LanguageKey>("zh");
   const [result, setResult] = useState<SolveResult | null>(null);
@@ -1173,6 +1264,7 @@ function App() {
   const sceneDirtyRef = useRef(true);
   const historyRef = useRef<StructureModel[]>([]);
   const resultPopupDragRef = useRef<{ startX: number; startY: number; originX: number; originY: number } | null>(null);
+  const cameraViewRef = useRef<{ position: [number, number, number]; target: [number, number, number] } | null>(null);
   const [undoCount, setUndoCount] = useState(0);
 
   useEffect(() => { modelRef.current = model; }, [model]);
@@ -1191,7 +1283,7 @@ function App() {
   useEffect(() => { languageRef.current = language; }, [language]);
   useEffect(() => { staticDeformScaleRef.current = staticDeformScale; }, [staticDeformScale]);
   useEffect(() => { modalDeformScaleRef.current = modalDeformScale; }, [modalDeformScale]);
-  useEffect(() => { sceneDirtyRef.current = true; }, [model, result, modalResult, activeMode, modalAnimate, modalColor, staticDeformScale, modalDeformScale, selectedNode, selectedElement]);
+  useEffect(() => { sceneDirtyRef.current = true; }, [model, result, modalResult, activeMode, modalAnimate, modalColor, staticDeformScale, modalDeformScale, selectedNode, selectedElement, memberSnapVisible]);
   useEffect(() => { setModalResult(null); setActiveMode(1); setModalAnimate(false); }, [model]);
 
   const selectedLoad = useMemo(() => model.loads.find((load) => load.nodeId === selectedNode), [model.loads, selectedNode]);
@@ -1258,10 +1350,18 @@ function App() {
     editing: en ? "Editing" : "正在编辑",
     newTag: en ? "New tag" : "新标签",
     addSectionTag: en ? "Add section tag" : "新增截面标签",
+    width: en ? "Width" : "宽度",
+    height: en ? "Height" : "高度",
+    scriptModel: en ? "Script model" : "脚本建模",
+    importScript: en ? "Import script" : "读取脚本",
+    scriptHint: en ? "Abaqus-like block format: *Node and *Element each on its own line, followed by table rows. Coordinates use the current unit." : "Abaqus 类似分段格式：*Node 和 *Element 各自单独一行，后面换行接表；坐标采用当前单位。",
     spatialGrid: en ? "Spatial Grid" : "空间 Grid",
     hideGrid: en ? "Hide spatial Grid" : "隐藏空间 Grid",
     showGrid: en ? "Show spatial Grid" : "显示空间 Grid",
     spacing: en ? "Spacing" : "间距",
+    memberSnap: en ? "Member snap" : "梁杆拾取点",
+    showMemberSnap: en ? "Show snap points" : "显示拾取点",
+    hideMemberSnap: en ? "Hide snap points" : "隐藏拾取点",
     numericCreate: en ? "Create by coordinates" : "数值新建",
     absoluteCoordinates: en ? "Absolute coordinates" : "绝对坐标",
     createNode: en ? "Create node" : "新建节点",
@@ -1564,6 +1664,10 @@ function App() {
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.target.copy(sceneCenter);
+    if (cameraViewRef.current) {
+      camera.position.fromArray(cameraViewRef.current.position);
+      controls.target.fromArray(cameraViewRef.current.target);
+    }
     controls.enableDamping = true;
 
     scene.add(new THREE.HemisphereLight("#ffffff", "#b8c1d1", 2.4));
@@ -1675,6 +1779,7 @@ function App() {
       const displacementScale = (solved?.maxDisplacement ? Math.min(200, 1.8 / solved.maxDisplacement) : 1) * Math.max(0, staticDeformScaleRef.current);
       const forceMap = new Map(solved?.elementForces.map((force) => [force.elementId, force]));
       const maxAxial = Math.max(1, ...(solved?.elementForces.map((force) => Math.abs(force.axial)) ?? [0]));
+      const memberSnapPositions: number[] = [];
       for (const element of current.elements) {
         const a = nodeMap.get(element.startNodeId);
         const b = nodeMap.get(element.endNodeId);
@@ -1691,6 +1796,12 @@ function App() {
         memberMesh.userData.elementId = element.id;
         content.add(memberMesh);
         memberPickTargets.push(memberMesh);
+        if (memberSnapVisible) {
+          for (const ratio of memberSnapRatios) {
+            const point = interpolateNode(a, b, ratio);
+            memberSnapPositions.push(point.x * currentUnitScale, point.z * currentUnitScale, point.y * currentUnitScale);
+          }
+        }
 
         if (solved) {
           const deformed = new THREE.BufferGeometry().setFromPoints([
@@ -1700,6 +1811,15 @@ function App() {
           content.add(new THREE.Line(deformed, new THREE.LineBasicMaterial({ color: "#e4572e" })));
         }
 
+      }
+
+      if (memberSnapPositions.length > 0) {
+        const snapGeometry = new THREE.BufferGeometry();
+        snapGeometry.setAttribute("position", new THREE.Float32BufferAttribute(memberSnapPositions, 3));
+        content.add(new THREE.Points(
+          snapGeometry,
+          new THREE.PointsMaterial({ color: "#00a6ff", size: 0.1 * symbolScale, sizeAttenuation: true, transparent: true, opacity: modalMode ? 0.45 : 0.88, depthTest: false }),
+        ));
       }
 
       for (const node of current.nodes) {
@@ -2088,6 +2208,10 @@ function App() {
     animate();
 
     return () => {
+      cameraViewRef.current = {
+        position: camera.position.toArray() as [number, number, number],
+        target: controls.target.toArray() as [number, number, number],
+      };
       cancelAnimationFrame(animationId);
       window.removeEventListener("resize", resize);
       renderer.domElement.removeEventListener("pointerdown", onPointerDown);
@@ -2116,13 +2240,26 @@ function App() {
     setResult(null);
   };
 
-  const updateSection = (key: "A" | "Iy" | "Iz" | "J", value: number) => {
+  const updateSection = (key: "width" | "height" | "A" | "Iy" | "Iz" | "J", value: number) => {
     saveHistory();
     setModel((current) => ({
       ...current,
       sections: current.sections.map((item) => item.id === activeSection.id ? { ...item, [key]: value } : item),
     }));
     setResult(null);
+  };
+
+  const updateRectangularSectionDimension = (key: "width" | "height", value: number) => {
+    const nextWidth = key === "width" ? value : activeSection.width ?? Math.sqrt(Math.max(activeSection.A, 0));
+    const nextHeight = key === "height" ? value : activeSection.height ?? Math.sqrt(Math.max(activeSection.A, 0));
+    const computed = rectangularSectionFromDimensions(nextWidth, nextHeight);
+    saveHistory();
+    setModel((current) => ({
+      ...current,
+      sections: current.sections.map((item) => item.id === activeSection.id ? { ...item, ...computed } : item),
+    }));
+    setResult(null);
+    setModalResult(null);
   };
 
   const createSectionFromActive = () => {
@@ -2167,6 +2304,25 @@ function App() {
       return;
     }
     setDefaultSectionId(sectionId);
+  };
+
+  const importScriptModel = () => {
+    try {
+      const next = parseModelScript(scriptDraft, model, defaultMaterialId, defaultSectionId);
+      saveHistory();
+      setModel(next);
+      setSelectedNode(next.nodes[0]?.id ?? null);
+      setSelectedElement(null);
+      setPendingNode(null);
+      setTool("member");
+      setResult(null);
+      setModalResult(null);
+      setActiveMode(1);
+      setModalAnimate(false);
+      setError(null);
+    } catch (scriptError) {
+      setError(scriptError instanceof Error ? scriptError.message : (en ? "Failed to import script." : "脚本读取失败。"));
+    }
   };
 
   const confirmSelectedLoad = () => {
@@ -2676,6 +2832,20 @@ function App() {
           <button onClick={() => loadExampleModel()}><RefreshCcw size={17} />{text.loadExample}</button>
         </section>
 
+        <section className="panel collapsiblePanel">
+          <button className="panelToggle" onClick={() => setScriptOpen((open) => !open)} aria-expanded={scriptOpen}>
+            {scriptOpen ? <ChevronDown size={17} /> : <ChevronRight size={17} />}
+            <span>{text.scriptModel}</span>
+          </button>
+          {scriptOpen && (
+            <div className="panelBody">
+              <p className="selectionText">{text.scriptHint}</p>
+              <textarea className="scriptInput" value={scriptDraft} onChange={(event) => setScriptDraft(event.target.value)} spellCheck={false} />
+              <button onClick={importScriptModel}><FolderOpen size={17} />{text.importScript}</button>
+            </div>
+          )}
+        </section>
+
         <section className="panel compactPanel">
           <h2>{text.select}</h2>
           <p className="selectionText">
@@ -2785,6 +2955,10 @@ function App() {
               <NumberField label="E Pa" value={activeMaterial.E} onChange={(value) => updateMaterial("E", value)} />
               <NumberField label="G Pa" value={activeMaterial.G} onChange={(value) => updateMaterial("G", value)} />
               <NumberField label="rho kg/m3" value={activeMaterial.density} onChange={(value) => updateMaterial("density", value)} />
+              <div className="sectionDimensionGrid">
+                <NumberField label={`${text.width} m`} value={activeSection.width ?? 0} onChange={(value) => updateRectangularSectionDimension("width", value)} />
+                <NumberField label={`${text.height} m`} value={activeSection.height ?? 0} onChange={(value) => updateRectangularSectionDimension("height", value)} />
+              </div>
               <NumberField label="A m^2" value={activeSection.A} onChange={(value) => updateSection("A", value)} />
               <NumberField label="Iy m^4" value={activeSection.Iy} onChange={(value) => updateSection("Iy", value)} />
               <NumberField label="Iz m^4" value={activeSection.Iz} onChange={(value) => updateSection("Iz", value)} />
@@ -2799,6 +2973,10 @@ function App() {
             <button onClick={() => setGridVisible((visible) => !visible)}>
               {gridVisible ? <EyeOff size={17} /> : <Eye size={17} />}
               {gridVisible ? text.hideGrid : text.showGrid}
+            </button>
+            <button className={memberSnapVisible ? "active" : ""} onClick={() => setMemberSnapVisible((visible) => !visible)}>
+              {memberSnapVisible ? <EyeOff size={17} /> : <Eye size={17} />}
+              {memberSnapVisible ? text.hideMemberSnap : text.showMemberSnap}
             </button>
             <div className="gridStepField">
               <NumberField
