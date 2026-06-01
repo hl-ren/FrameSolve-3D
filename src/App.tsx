@@ -1006,6 +1006,22 @@ function createDisplayMember(start: THREE.Vector3, end: THREE.Vector3, radius: n
   return mesh;
 }
 
+function createMemberPickMesh(start: THREE.Vector3, end: THREE.Vector3, radius: number): THREE.Mesh {
+  const direction = end.clone().sub(start);
+  const length = direction.length();
+  const geometry = new THREE.CylinderGeometry(radius, radius, length, 8, 1);
+  const material = new THREE.MeshBasicMaterial({
+    color: "#ffffff",
+    transparent: true,
+    opacity: 0,
+    depthWrite: false,
+  });
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.position.copy(start).add(end).multiplyScalar(0.5);
+  mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction.normalize());
+  return mesh;
+}
+
 function disposeObject(object: THREE.Object3D): void {
   object.traverse((child) => {
     const mesh = child as THREE.Mesh;
@@ -1799,6 +1815,7 @@ function App() {
       setModalResult(null);
       setActiveMode(1);
       setModalAnimate(false);
+      setMemberDisplayMode("type");
       setError(null);
     } catch (solveError) {
       setResult(null);
@@ -2072,10 +2089,27 @@ function App() {
         const baseRadius = sectionDriven ? sectionRadius : typeRadius;
         const modalOriginalRadius = displayMode === "square" ? Math.max(0.012, sectionRadius * 0.65) : 0.01;
         const radius = symbolScale * (isSelectedElement ? 1.8 : 1) * (modalMode ? modalOriginalRadius : sectionDriven || !force || Math.abs(force.axial) <= axialTolerance ? baseRadius : 0.018 + 0.11 * forceRatio);
-        const memberMesh = createDisplayMember(toThree(a, currentUnitScale), toThree(b, currentUnitScale), radius, color, modalMode ? 0.62 : 1, displayMode === "square" ? "square" : "round");
+        const startPoint = toThree(a, currentUnitScale);
+        const endPoint = toThree(b, currentUnitScale);
+        const memberMesh = createDisplayMember(startPoint, endPoint, radius, color, modalMode ? 0.62 : 1, displayMode === "square" ? "square" : "round");
         memberMesh.userData.elementId = element.id;
         content.add(memberMesh);
-        memberPickTargets.push(memberMesh);
+        if (isSelectedElement && !modalMode) {
+          const highlightMesh = createDisplayMember(
+            startPoint,
+            endPoint,
+            radius * 1.28 + symbolScale * 0.008,
+            "#facc15",
+            0.42,
+            displayMode === "square" ? "square" : "round",
+          );
+          highlightMesh.renderOrder = 3;
+          content.add(highlightMesh);
+        }
+        const pickMesh = createMemberPickMesh(startPoint, endPoint, Math.max(radius * 2.4, symbolScale * 0.08, sceneSize * 0.004));
+        pickMesh.userData.elementId = element.id;
+        content.add(pickMesh);
+        memberPickTargets.push(pickMesh);
         if (memberSnapVisible) {
           for (const ratio of memberSnapRatios) {
             const point = interpolateNode(a, b, ratio);
@@ -2380,6 +2414,10 @@ function App() {
             return;
           }
         }
+        setSelectedElement(elementId);
+        setSelectedNode(null);
+        setPendingNode(null);
+        return;
       }
       if (memberHit?.object.userData.elementId && toolRef.current === "select") {
         setSelectedElement(memberHit.object.userData.elementId as string);
@@ -3175,13 +3213,21 @@ function App() {
             <span><i style={{ background: elementTypeColor("mixed") }} />{text.hingedBeam}</span>
           </div>
           {selectedElementData && (
-            <div className="segmented twoSegment">
-              <button className={selectedElementData.type === "bar3d" ? "active" : ""} onClick={() => setSelectedElementType("bar3d")}>
-                {text.barElement}
-              </button>
-              <button className={selectedElementData.type === "beam3d" ? "active" : ""} onClick={() => setSelectedElementType("beam3d")}>
-                {text.beamElement}
-              </button>
+            <div className="selectedElementControls">
+              <div className="segmented twoSegment">
+                <button className={selectedElementData.type === "bar3d" ? "active" : ""} onClick={() => setSelectedElementType("bar3d")}>
+                  {text.barElement}
+                </button>
+                <button className={selectedElementData.type === "beam3d" ? "active" : ""} onClick={() => setSelectedElementType("beam3d")}>
+                  {text.beamElement}
+                </button>
+              </div>
+              <label className="selectField">
+                <span>{text.sectionTag}</span>
+                <select value={activeSection.id} onChange={(event) => applySection(event.target.value)}>
+                  {model.sections.map((section) => <option key={section.id} value={section.id}>{section.name}</option>)}
+                </select>
+              </label>
             </div>
           )}
           <button onClick={autoClassifyElements} disabled={model.elements.length === 0}><RefreshCcw size={17} />{text.autoClassify}</button>
