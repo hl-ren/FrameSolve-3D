@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { BoxSelect, ChevronDown, ChevronRight, CircleDot, CircleHelp, Eraser, Eye, EyeOff, FilePlus2, FolderOpen, Hammer, Link2, Play, Plus, RefreshCcw, Save, Sigma, Trash2, Undo2, X } from "lucide-react";
+import { BoxSelect, ChevronDown, ChevronRight, CircleDot, CircleHelp, Eraser, Eye, EyeOff, FilePlus2, FolderOpen, Hammer, Link2, Palette, Play, Plus, RefreshCcw, Save, Sigma, Trash2, Undo2, X } from "lucide-react";
 import { solveModalAnalysis, solveStructure } from "./core/fem";
 import { type BoundaryCondition, type DofKey, dofKeys, type ElementForce, type ElementLoad, type ElementType, type LoadCoordinate, type Material, type ModalResult, type Section, type SolveResult, type StructureModel, type StructureNode, type Vec3 } from "./core/types";
 
@@ -82,6 +82,7 @@ type ProjectFile = {
 };
 
 type SolveKind = "static" | "modal";
+type MemberDisplayMode = "type" | "area" | "size" | "relativeArea" | "square";
 
 const appName = "FrameSolve 3D";
 
@@ -799,6 +800,23 @@ function formatMomentPair(start: number | undefined, end: number | undefined, un
   return `${formatMoment(start, unit)} / ${formatMoment(end, unit)}`;
 }
 
+function sectionDisplayRadius(section: Section | undefined, maxArea: number, mode: MemberDisplayMode): number {
+  const area = Math.max(0, section?.A ?? 0);
+  const side = Math.sqrt(area);
+  const size = Math.max(section?.width ?? side, section?.height ?? side, side);
+  if (mode === "area") return THREE.MathUtils.clamp(Math.sqrt(area / Math.PI) * 1.35, 0.014, 0.16);
+  if (mode === "size" || mode === "square") return THREE.MathUtils.clamp(size * 0.5, 0.014, 0.16);
+  const ratio = maxArea > 1e-12 ? area / maxArea : 0;
+  return 0.014 + 0.12 * ratio;
+}
+
+function shadeColor(color: string, amount: number): string {
+  const base = new THREE.Color(color);
+  const target = new THREE.Color(amount >= 0 ? "#ffffff" : "#000000");
+  base.lerp(target, Math.min(1, Math.abs(amount)));
+  return `#${base.getHexString()}`;
+}
+
 function toThree(node: StructureNode, modelScale: number, displacement?: Record<DofKey, number>, displacementScale = 1): THREE.Vector3 {
   const dx = displacement?.ux ?? 0;
   const dy = displacement?.uy ?? 0;
@@ -821,12 +839,42 @@ function createMemberMesh(start: THREE.Vector3, end: THREE.Vector3, radius: numb
   return mesh;
 }
 
-function createDisplayMember(start: THREE.Vector3, end: THREE.Vector3, radius: number, color: string, opacity = 1): THREE.Mesh {
-  const mesh = createMemberMesh(start, end, radius, color);
-  const material = mesh.material as THREE.MeshStandardMaterial;
-  material.transparent = opacity < 1;
-  material.opacity = opacity;
-  material.depthWrite = opacity >= 1;
+function createSquareMemberMesh(start: THREE.Vector3, end: THREE.Vector3, halfSize: number, color: string): THREE.Mesh {
+  const direction = end.clone().sub(start);
+  const length = direction.length();
+  const geometry = new THREE.BoxGeometry(halfSize * 2, length, halfSize * 2);
+  const faceColors = [0.32, -0.22, 0.18, -0.34, 0.08, -0.12];
+  const materials = faceColors.map((amount) => new THREE.MeshStandardMaterial({
+    color: shadeColor(color, amount),
+    roughness: 0.46,
+    metalness: 0.04,
+  }));
+  const mesh = new THREE.Mesh(geometry, materials);
+  const edges = new THREE.LineSegments(
+    new THREE.EdgesGeometry(geometry),
+    new THREE.LineBasicMaterial({ color: shadeColor(color, -0.62), transparent: true, opacity: 0.95 }),
+  );
+  edges.renderOrder = 2;
+  mesh.add(edges);
+  mesh.position.copy(start).add(end).multiplyScalar(0.5);
+  mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction.normalize());
+  return mesh;
+}
+
+function createDisplayMember(start: THREE.Vector3, end: THREE.Vector3, radius: number, color: string, opacity = 1, shape: "round" | "square" = "round"): THREE.Mesh {
+  const mesh = shape === "square" ? createSquareMemberMesh(start, end, radius, color) : createMemberMesh(start, end, radius, color);
+  const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+  materials.forEach((material) => {
+    material.transparent = opacity < 1;
+    material.opacity = opacity;
+    material.depthWrite = opacity >= 1;
+  });
+  mesh.children.forEach((child) => {
+    const childMaterial = (child as THREE.LineSegments).material as THREE.Material | undefined;
+    if (!childMaterial) return;
+    childMaterial.transparent = true;
+    childMaterial.opacity = Math.min(1, opacity + 0.2);
+  });
   return mesh;
 }
 
@@ -1292,6 +1340,7 @@ function App() {
   const [sectionNameDraft, setSectionNameDraft] = useState("New section");
   const [materialOpen, setMaterialOpen] = useState(false);
   const [scriptOpen, setScriptOpen] = useState(false);
+  const [displayOpen, setDisplayOpen] = useState(false);
   const [scriptDraft, setScriptDraft] = useState("*Node\n1, 0, 0, 0\n2, 10, 0, 0\n3, 5, 0, 0\n4, 10, 10, 0\n*Section\n1, 0.01\n2, 0.04\n*Element\n1, 1, 2, 2\n2, 2, 4, 1");
   const [helpOpen, setHelpOpen] = useState(false);
   const [language, setLanguage] = useState<LanguageKey>("zh");
@@ -1304,7 +1353,10 @@ function App() {
   const [activeMode, setActiveMode] = useState(1);
   const [modalAnimate, setModalAnimate] = useState(false);
   const [modalColor, setModalColor] = useState("#ff2d2d");
-  const [sectionAreaDisplay, setSectionAreaDisplay] = useState(false);
+  const [memberDisplayMode, setMemberDisplayMode] = useState<MemberDisplayMode>("relativeArea");
+  const [memberDisplayColor, setMemberDisplayColor] = useState("#2563eb");
+  const [memberDisplayScale, setMemberDisplayScale] = useState(1);
+  const [memberColorDialogOpen, setMemberColorDialogOpen] = useState(false);
   const [staticDeformScale, setStaticDeformScale] = useState(1);
   const [modalDeformScale, setModalDeformScale] = useState(1);
   const [modalModeCount, setModalModeCount] = useState(8);
@@ -1323,7 +1375,9 @@ function App() {
   const activeModeRef = useRef(activeMode);
   const modalAnimateRef = useRef(modalAnimate);
   const modalColorRef = useRef(modalColor);
-  const sectionAreaDisplayRef = useRef(sectionAreaDisplay);
+  const memberDisplayModeRef = useRef(memberDisplayMode);
+  const memberDisplayColorRef = useRef(memberDisplayColor);
+  const memberDisplayScaleRef = useRef(memberDisplayScale);
   const languageRef = useRef(language);
   const staticDeformScaleRef = useRef(staticDeformScale);
   const modalDeformScaleRef = useRef(modalDeformScale);
@@ -1346,11 +1400,13 @@ function App() {
   useEffect(() => { activeModeRef.current = activeMode; }, [activeMode]);
   useEffect(() => { modalAnimateRef.current = modalAnimate; }, [modalAnimate]);
   useEffect(() => { modalColorRef.current = modalColor; }, [modalColor]);
-  useEffect(() => { sectionAreaDisplayRef.current = sectionAreaDisplay; }, [sectionAreaDisplay]);
+  useEffect(() => { memberDisplayModeRef.current = memberDisplayMode; }, [memberDisplayMode]);
+  useEffect(() => { memberDisplayColorRef.current = memberDisplayColor; }, [memberDisplayColor]);
+  useEffect(() => { memberDisplayScaleRef.current = memberDisplayScale; }, [memberDisplayScale]);
   useEffect(() => { languageRef.current = language; }, [language]);
   useEffect(() => { staticDeformScaleRef.current = staticDeformScale; }, [staticDeformScale]);
   useEffect(() => { modalDeformScaleRef.current = modalDeformScale; }, [modalDeformScale]);
-  useEffect(() => { sceneDirtyRef.current = true; }, [model, result, modalResult, activeMode, modalAnimate, modalColor, staticDeformScale, modalDeformScale, selectedNode, selectedElement, memberSnapVisible, sectionAreaDisplay]);
+  useEffect(() => { sceneDirtyRef.current = true; }, [model, result, modalResult, activeMode, modalAnimate, modalColor, staticDeformScale, modalDeformScale, selectedNode, selectedElement, memberSnapVisible, memberDisplayMode, memberDisplayColor, memberDisplayScale]);
   useEffect(() => { setModalResult(null); setActiveMode(1); setModalAnimate(false); }, [model]);
 
   const selectedLoad = useMemo(() => model.loads.find((load) => load.nodeId === selectedNode), [model.loads, selectedNode]);
@@ -1441,10 +1497,18 @@ function App() {
     confirmMass: en ? "Confirm mass" : "确认质点",
     deleteMass: en ? "Delete mass" : "删除质点",
     display: en ? "Display" : "求解显示",
+    displayType: en ? "Type" : "按类型",
+    displayArea: en ? "Area" : "按面积",
+    displaySize: en ? "Size" : "按尺寸",
+    displayRelativeArea: en ? "Relative A" : "相对最大面积",
+    displaySquare: en ? "Square" : "方形",
+    displayColor: en ? "Color" : "颜色",
+    displayColorTitle: en ? "Member Display Color" : "杆件显示颜色",
+    displayColorHint: en ? "Used by area, size, relative-area and square display modes." : "用于按面积、按尺寸、相对最大面积和方形显示模式。",
+    sectionScale: en ? "Section scale" : "截面scale",
     staticScale: en ? "Static scale" : "静力scale",
     modalScale: en ? "Modal scale" : "模态scale",
     modalCount: en ? "Mode count" : "模态阶数",
-    areaDisplay: en ? "Show by area" : "按面积显示",
     solve: en ? "Solve" : "求解",
     frequency: en ? "Frequency" : "频率",
     clear: en ? "Clear" : "清空",
@@ -1811,6 +1875,8 @@ function App() {
       const modalMode = modalModes.find((mode) => mode.mode === activeModeRef.current) ?? modalModes[0];
       if (!modalMode) return;
       const nodeMap = new Map(current.nodes.map((node) => [node.id, node]));
+      const sectionMap = new Map(current.sections.map((section) => [section.id, section]));
+      const maxSectionArea = Math.max(1e-12, ...current.elements.map((element) => Math.max(0, sectionMap.get(element.sectionId)?.A ?? 0)));
       const modeShapeScale = sceneSize * 0.12 * Math.max(0, modalDeformScaleRef.current);
       const modeRelativeOmega = modalModes[0] ? Math.max(0.25, Math.min(4, modalMode.omega / modalModes[0].omega)) : 1;
       const modePhase = modalAnimateRef.current ? Math.sin((performance.now() / 1000) * 2.2 * modeRelativeOmega) : 1;
@@ -1818,11 +1884,16 @@ function App() {
         const a = nodeMap.get(element.startNodeId);
         const b = nodeMap.get(element.endNodeId);
         if (!a || !b) continue;
+        const displayMode = memberDisplayModeRef.current;
+        const sectionDriven = displayMode !== "type";
+        const radius = symbolScale * Math.max(0, memberDisplayScaleRef.current) * (sectionDriven ? sectionDisplayRadius(sectionMap.get(element.sectionId), maxSectionArea, displayMode) : 0.034);
         modalContent.add(createDisplayMember(
           toThree(a, currentUnitScale, modalMode.displacements[a.id], modeShapeScale * modePhase),
           toThree(b, currentUnitScale, modalMode.displacements[b.id], modeShapeScale * modePhase),
-          symbolScale * 0.034,
+          radius,
           modalColorRef.current,
+          1,
+          displayMode === "square" ? "square" : "round",
         ));
       }
     };
@@ -1858,15 +1929,22 @@ function App() {
         const axialTolerance = maxAxial * 1e-6;
         const isSelectedElement = selectedElementRef.current === element.id;
         const visualKind = elementVisualKind(element, nodeMap);
-        const color = isSelectedElement ? "#f2a900" : modalMode ? "#cbd5e1" : !force || Math.abs(force.axial) <= axialTolerance ? elementTypeColor(visualKind) : force.axial > 0 ? "#1b8f4d" : "#d33f32";
         const forceRatio = force ? Math.abs(force.axial) / maxAxial : 0;
-        const sectionAreaRatio = Math.sqrt(Math.max(0, sectionMap.get(element.sectionId)?.A ?? 0) / maxSectionArea);
         const typeRadius = visualKind === "bar" ? 0.022 : visualKind === "mixed" ? 0.03 : 0.036;
-        const areaRadius = 0.016 + 0.08 * sectionAreaRatio;
-        const areaDisplay = sectionAreaDisplayRef.current && !modalMode;
-        const baseRadius = areaDisplay ? areaRadius : typeRadius;
-        const radius = symbolScale * (isSelectedElement ? 1.8 : 1) * (modalMode ? 0.01 : areaDisplay || !force || Math.abs(force.axial) <= axialTolerance ? baseRadius : 0.018 + 0.11 * forceRatio);
-        const memberMesh = createDisplayMember(toThree(a, currentUnitScale), toThree(b, currentUnitScale), radius, color, modalMode ? 0.62 : 1);
+        const displayMode = memberDisplayModeRef.current;
+        const sectionRadius = sectionDisplayRadius(sectionMap.get(element.sectionId), maxSectionArea, displayMode) * Math.max(0, memberDisplayScaleRef.current);
+        const sectionDriven = displayMode !== "type" && !modalMode;
+        const color = isSelectedElement
+          ? "#f2a900"
+          : modalMode
+            ? "#cbd5e1"
+            : sectionDriven
+              ? memberDisplayColorRef.current
+              : !force || Math.abs(force.axial) <= axialTolerance ? elementTypeColor(visualKind) : force.axial > 0 ? "#1b8f4d" : "#d33f32";
+        const baseRadius = sectionDriven ? sectionRadius : typeRadius;
+        const modalOriginalRadius = displayMode === "square" ? Math.max(0.012, sectionRadius * 0.65) : 0.01;
+        const radius = symbolScale * (isSelectedElement ? 1.8 : 1) * (modalMode ? modalOriginalRadius : sectionDriven || !force || Math.abs(force.axial) <= axialTolerance ? baseRadius : 0.018 + 0.11 * forceRatio);
+        const memberMesh = createDisplayMember(toThree(a, currentUnitScale), toThree(b, currentUnitScale), radius, color, modalMode ? 0.62 : 1, displayMode === "square" ? "square" : "round");
         memberMesh.userData.elementId = element.id;
         content.add(memberMesh);
         memberPickTargets.push(memberMesh);
@@ -2804,6 +2882,36 @@ function App() {
           </section>
         </div>
       )}
+      {memberColorDialogOpen && (
+        <div className="modalBackdrop" onClick={() => setMemberColorDialogOpen(false)}>
+          <section className="colorDialog" onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="display-color-title">
+            <header className="helpHeader">
+              <div>
+                <h2 id="display-color-title">{text.displayColorTitle}</h2>
+                <span>{text.displayColorHint}</span>
+              </div>
+              <button className="iconButton" onClick={() => setMemberColorDialogOpen(false)} title={text.close}><X size={18} /></button>
+            </header>
+            <div className="colorDialogBody">
+              <label className="colorPickerField">
+                <span>{text.displayColor}</span>
+                <input type="color" value={memberDisplayColor} onChange={(event) => setMemberDisplayColor(event.target.value)} />
+              </label>
+              <div className="colorSwatches">
+                {["#2563eb", "#16a34a", "#dc2626", "#d97706", "#7c3aed", "#0f172a"].map((color) => (
+                  <button
+                    key={color}
+                    className={memberDisplayColor === color ? "active" : ""}
+                    style={{ background: color }}
+                    onClick={() => setMemberDisplayColor(color)}
+                    aria-label={color}
+                  />
+                ))}
+              </div>
+            </div>
+          </section>
+        </div>
+      )}
       {resultPopupOpen && modalResult && (
         <section
           className="resultPopup modalResultPopup"
@@ -3138,16 +3246,38 @@ function App() {
           </div>
         </section>
 
-        <section className="panel">
-          <h2>{text.display}</h2>
-          <div className="offsetGrid">
-            <NumberField label={text.staticScale} value={staticDeformScale} onChange={(value) => setStaticDeformScale(Math.max(0, value))} />
-            <NumberField label={text.modalScale} value={modalDeformScale} onChange={(value) => setModalDeformScale(Math.max(0, value))} />
-            <NumberField label={text.modalCount} value={modalModeCount} onChange={(value) => setModalModeCount(Math.max(1, Math.min(24, Math.round(value))))} />
-          </div>
-          <button className={sectionAreaDisplay ? "active" : ""} onClick={() => setSectionAreaDisplay((current) => !current)}>
-            <BoxSelect size={17} />{text.areaDisplay}
+        <section className="panel collapsiblePanel">
+          <button className="panelToggle" onClick={() => setDisplayOpen((open) => !open)} aria-expanded={displayOpen}>
+            {displayOpen ? <ChevronDown size={17} /> : <ChevronRight size={17} />}
+            <span>{text.display}</span>
+            <small>{memberDisplayMode === "square" ? text.displaySquare : memberDisplayMode === "relativeArea" ? text.displayRelativeArea : memberDisplayMode === "area" ? text.displayArea : memberDisplayMode === "size" ? text.displaySize : text.displayType}</small>
           </button>
+          {displayOpen && (
+            <div className="panelBody">
+              <div className="offsetGrid">
+                <NumberField label={text.staticScale} value={staticDeformScale} onChange={(value) => setStaticDeformScale(Math.max(0, value))} />
+                <NumberField label={text.modalScale} value={modalDeformScale} onChange={(value) => setModalDeformScale(Math.max(0, value))} />
+                <NumberField label={text.modalCount} value={modalModeCount} onChange={(value) => setModalModeCount(Math.max(1, Math.min(24, Math.round(value))))} />
+                <NumberField label={text.sectionScale} value={memberDisplayScale} onChange={(value) => setMemberDisplayScale(Math.max(0, value))} />
+              </div>
+              <div className="displayModeGrid">
+                {([
+                  ["type", text.displayType],
+                  ["area", text.displayArea],
+                  ["size", text.displaySize],
+                  ["relativeArea", text.displayRelativeArea],
+                  ["square", text.displaySquare],
+                ] as Array<[MemberDisplayMode, string]>).map(([mode, label]) => (
+                  <button key={mode} className={memberDisplayMode === mode ? "active" : ""} onClick={() => setMemberDisplayMode(mode)}>
+                    {label}
+                  </button>
+                ))}
+                <button onClick={() => setMemberColorDialogOpen(true)}>
+                  <Palette size={15} />{text.displayColor}
+                </button>
+              </div>
+            </div>
+          )}
         </section>
 
         <div className="actions">
