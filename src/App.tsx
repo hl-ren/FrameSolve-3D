@@ -1136,10 +1136,15 @@ function normalizeElementToken(token: string): string {
   return /^e/i.test(text) ? text.toUpperCase() : `E${text}`;
 }
 
+function scriptSectionId(index: string): string {
+  return `script-sec-${index.trim().replace(/[^a-zA-Z0-9_-]+/g, "-")}`;
+}
+
 function parseModelScript(script: string, template: StructureModel, materialId: string, sectionId: string): StructureModel {
   const nodes: StructureNode[] = [];
-  const elements: StructureModel["elements"] = [];
-  let mode: "node" | "element" | null = null;
+  const sectionAreas = new Map<string, number>();
+  const rawElements: Array<{ id: string; startNodeId: string; endNodeId: string; sectionIndex?: string }> = [];
+  let mode: "node" | "element" | "section" | null = null;
 
   const parseNode = (parts: string[]) => {
     if (parts.length < 4) throw new Error(`Invalid node line: ${parts.join(", ")}`);
@@ -1153,15 +1158,21 @@ function parseModelScript(script: string, template: StructureModel, materialId: 
 
   const parseElement = (parts: string[]) => {
     if (parts.length < 3) throw new Error(`Invalid element line: ${parts.join(", ")}`);
-    const [idText, startText, endText] = parts;
-    elements.push({
+    const [idText, startText, endText, sectionText] = parts;
+    rawElements.push({
       id: normalizeElementToken(idText),
-      type: "bar3d",
       startNodeId: normalizeNodeToken(startText),
       endNodeId: normalizeNodeToken(endText),
-      materialId,
-      sectionId,
+      sectionIndex: sectionText?.trim(),
     });
+  };
+
+  const parseSection = (parts: string[]) => {
+    if (parts.length < 2) throw new Error(`Invalid section line: ${parts.join(", ")}`);
+    const [indexText, areaText] = parts;
+    const area = Number(areaText);
+    if (!Number.isFinite(area) || area <= 0) throw new Error(`Invalid section area: ${parts.join(", ")}`);
+    sectionAreas.set(indexText.trim(), area);
   };
 
   for (const rawLine of script.split(/\r?\n/)) {
@@ -1179,19 +1190,72 @@ function parseModelScript(script: string, template: StructureModel, materialId: 
       if (parts.length > 1) throw new Error("*Element must be on its own line.");
       continue;
     }
+    if (keyword === "*section" || keyword === "*sections") {
+      mode = "section";
+      if (parts.length > 1) throw new Error("*Section must be on its own line.");
+      continue;
+    }
     if (mode === "node") parseNode(parts);
     else if (mode === "element") parseElement(parts);
-    else throw new Error(`Line must follow *Node or *Element: ${line}`);
+    else if (mode === "section") parseSection(parts);
+    else throw new Error(`Line must follow *Node, *Element or *Section: ${line}`);
   }
 
   if (nodes.length === 0) throw new Error("No nodes found in script.");
   const nodeIds = new Set(nodes.map((node) => node.id));
-  const validElements = elements.filter((element) => nodeIds.has(element.startNodeId) && nodeIds.has(element.endNodeId));
-  if (validElements.length !== elements.length) throw new Error("Some elements reference missing nodes.");
+  if (rawElements.some((element) => !nodeIds.has(element.startNodeId) || !nodeIds.has(element.endNodeId))) {
+    throw new Error("Some elements reference missing nodes.");
+  }
+  const scriptSections: Section[] = [...sectionAreas.entries()].map(([index, area]) => {
+    const side = Math.sqrt(area);
+    return {
+      id: scriptSectionId(index),
+      name: `Section ${index}`,
+      ...rectangularSectionFromDimensions(side, side),
+    };
+  });
+  const sectionIndexMap = new Map([...sectionAreas.keys()].map((index) => [index, scriptSectionId(index)]));
+  const nodeMap = new Map(nodes.map((node) => [node.id, node]));
+  const usedElementIds: string[] = [];
+  const elements: StructureModel["elements"] = [];
+  const reserveElementId = (preferred: string) => {
+    const id = usedElementIds.includes(preferred) ? nextId("E", usedElementIds) : preferred;
+    usedElementIds.push(id);
+    return id;
+  };
+
+  for (const raw of rawElements) {
+    const start = nodeMap.get(raw.startNodeId);
+    const end = nodeMap.get(raw.endNodeId);
+    if (!start || !end) continue;
+    if (samePoint(start, end)) throw new Error(`Zero length element: ${raw.id}`);
+    const points = [
+      { nodeId: raw.startNodeId, ratio: 0 },
+      ...nodes
+        .filter((node) => node.id !== raw.startNodeId && node.id !== raw.endNodeId)
+        .map((node) => ({ nodeId: node.id, ratio: pointOnSegmentRatio(node, start, end) }))
+        .filter((item): item is { nodeId: string; ratio: number } => item.ratio !== null)
+        .sort((a, b) => a.ratio - b.ratio),
+      { nodeId: raw.endNodeId, ratio: 1 },
+    ];
+    const assignedSectionId = raw.sectionIndex && sectionIndexMap.has(raw.sectionIndex) ? sectionIndexMap.get(raw.sectionIndex)! : sectionId;
+    for (let index = 0; index < points.length - 1; index += 1) {
+      elements.push({
+        id: reserveElementId(index === 0 ? raw.id : nextId("E", usedElementIds)),
+        type: "bar3d",
+        startNodeId: points[index].nodeId,
+        endNodeId: points[index + 1].nodeId,
+        materialId,
+        sectionId: assignedSectionId,
+      });
+    }
+  }
+
   return {
     ...template,
     nodes,
-    elements: validElements,
+    elements,
+    sections: [...template.sections.filter((section) => !section.id.startsWith("script-sec-")), ...scriptSections],
     boundaries: nodes.filter((node) => Math.abs(node.z) < 1e-9).map((node) => ({ nodeId: node.id, ux: true, uy: true, uz: true })),
     loads: [],
     elementLoads: [],
@@ -1228,7 +1292,7 @@ function App() {
   const [sectionNameDraft, setSectionNameDraft] = useState("New section");
   const [materialOpen, setMaterialOpen] = useState(false);
   const [scriptOpen, setScriptOpen] = useState(false);
-  const [scriptDraft, setScriptDraft] = useState("*Node\n1, 0, 0, 0\n2, 10, 0, 0\n3, 10, 10, 0\n*Element\n1, 1, 2\n2, 2, 3");
+  const [scriptDraft, setScriptDraft] = useState("*Node\n1, 0, 0, 0\n2, 10, 0, 0\n3, 5, 0, 0\n4, 10, 10, 0\n*Section\n1, 0.01\n2, 0.04\n*Element\n1, 1, 2, 2\n2, 2, 4, 1");
   const [helpOpen, setHelpOpen] = useState(false);
   const [language, setLanguage] = useState<LanguageKey>("zh");
   const [result, setResult] = useState<SolveResult | null>(null);
@@ -1240,6 +1304,7 @@ function App() {
   const [activeMode, setActiveMode] = useState(1);
   const [modalAnimate, setModalAnimate] = useState(false);
   const [modalColor, setModalColor] = useState("#ff2d2d");
+  const [sectionAreaDisplay, setSectionAreaDisplay] = useState(false);
   const [staticDeformScale, setStaticDeformScale] = useState(1);
   const [modalDeformScale, setModalDeformScale] = useState(1);
   const [modalModeCount, setModalModeCount] = useState(8);
@@ -1258,6 +1323,7 @@ function App() {
   const activeModeRef = useRef(activeMode);
   const modalAnimateRef = useRef(modalAnimate);
   const modalColorRef = useRef(modalColor);
+  const sectionAreaDisplayRef = useRef(sectionAreaDisplay);
   const languageRef = useRef(language);
   const staticDeformScaleRef = useRef(staticDeformScale);
   const modalDeformScaleRef = useRef(modalDeformScale);
@@ -1280,10 +1346,11 @@ function App() {
   useEffect(() => { activeModeRef.current = activeMode; }, [activeMode]);
   useEffect(() => { modalAnimateRef.current = modalAnimate; }, [modalAnimate]);
   useEffect(() => { modalColorRef.current = modalColor; }, [modalColor]);
+  useEffect(() => { sectionAreaDisplayRef.current = sectionAreaDisplay; }, [sectionAreaDisplay]);
   useEffect(() => { languageRef.current = language; }, [language]);
   useEffect(() => { staticDeformScaleRef.current = staticDeformScale; }, [staticDeformScale]);
   useEffect(() => { modalDeformScaleRef.current = modalDeformScale; }, [modalDeformScale]);
-  useEffect(() => { sceneDirtyRef.current = true; }, [model, result, modalResult, activeMode, modalAnimate, modalColor, staticDeformScale, modalDeformScale, selectedNode, selectedElement, memberSnapVisible]);
+  useEffect(() => { sceneDirtyRef.current = true; }, [model, result, modalResult, activeMode, modalAnimate, modalColor, staticDeformScale, modalDeformScale, selectedNode, selectedElement, memberSnapVisible, sectionAreaDisplay]);
   useEffect(() => { setModalResult(null); setActiveMode(1); setModalAnimate(false); }, [model]);
 
   const selectedLoad = useMemo(() => model.loads.find((load) => load.nodeId === selectedNode), [model.loads, selectedNode]);
@@ -1354,7 +1421,7 @@ function App() {
     height: en ? "Height" : "高度",
     scriptModel: en ? "Script model" : "脚本建模",
     importScript: en ? "Import script" : "读取脚本",
-    scriptHint: en ? "Abaqus-like block format: *Node and *Element each on its own line, followed by table rows. Coordinates use the current unit." : "Abaqus 类似分段格式：*Node 和 *Element 各自单独一行，后面换行接表；坐标采用当前单位。",
+    scriptHint: en ? "Abaqus-like block format: *Node, *Section and *Element each on its own line. Element rows are eid, n1, n2, secId when secId exists." : "Abaqus 类似分段格式：*Node、*Section、*Element 各自单独一行；单元行为 eid, n1, n2, secId（若 secId 存在）。",
     spatialGrid: en ? "Spatial Grid" : "空间 Grid",
     hideGrid: en ? "Hide spatial Grid" : "隐藏空间 Grid",
     showGrid: en ? "Show spatial Grid" : "显示空间 Grid",
@@ -1377,6 +1444,7 @@ function App() {
     staticScale: en ? "Static scale" : "静力scale",
     modalScale: en ? "Modal scale" : "模态scale",
     modalCount: en ? "Mode count" : "模态阶数",
+    areaDisplay: en ? "Show by area" : "按面积显示",
     solve: en ? "Solve" : "求解",
     frequency: en ? "Frequency" : "频率",
     clear: en ? "Clear" : "清空",
@@ -1779,6 +1847,8 @@ function App() {
       const displacementScale = (solved?.maxDisplacement ? Math.min(200, 1.8 / solved.maxDisplacement) : 1) * Math.max(0, staticDeformScaleRef.current);
       const forceMap = new Map(solved?.elementForces.map((force) => [force.elementId, force]));
       const maxAxial = Math.max(1, ...(solved?.elementForces.map((force) => Math.abs(force.axial)) ?? [0]));
+      const sectionMap = new Map(current.sections.map((section) => [section.id, section]));
+      const maxSectionArea = Math.max(1e-12, ...current.elements.map((element) => Math.max(0, sectionMap.get(element.sectionId)?.A ?? 0)));
       const memberSnapPositions: number[] = [];
       for (const element of current.elements) {
         const a = nodeMap.get(element.startNodeId);
@@ -1790,8 +1860,12 @@ function App() {
         const visualKind = elementVisualKind(element, nodeMap);
         const color = isSelectedElement ? "#f2a900" : modalMode ? "#cbd5e1" : !force || Math.abs(force.axial) <= axialTolerance ? elementTypeColor(visualKind) : force.axial > 0 ? "#1b8f4d" : "#d33f32";
         const forceRatio = force ? Math.abs(force.axial) / maxAxial : 0;
-        const baseRadius = visualKind === "bar" ? 0.022 : visualKind === "mixed" ? 0.03 : 0.036;
-        const radius = symbolScale * (isSelectedElement ? 1.8 : 1) * (modalMode ? 0.01 : !force || Math.abs(force.axial) <= axialTolerance ? baseRadius : 0.018 + 0.11 * forceRatio);
+        const sectionAreaRatio = Math.sqrt(Math.max(0, sectionMap.get(element.sectionId)?.A ?? 0) / maxSectionArea);
+        const typeRadius = visualKind === "bar" ? 0.022 : visualKind === "mixed" ? 0.03 : 0.036;
+        const areaRadius = 0.016 + 0.08 * sectionAreaRatio;
+        const areaDisplay = sectionAreaDisplayRef.current && !modalMode;
+        const baseRadius = areaDisplay ? areaRadius : typeRadius;
+        const radius = symbolScale * (isSelectedElement ? 1.8 : 1) * (modalMode ? 0.01 : areaDisplay || !force || Math.abs(force.axial) <= axialTolerance ? baseRadius : 0.018 + 0.11 * forceRatio);
         const memberMesh = createDisplayMember(toThree(a, currentUnitScale), toThree(b, currentUnitScale), radius, color, modalMode ? 0.62 : 1);
         memberMesh.userData.elementId = element.id;
         content.add(memberMesh);
@@ -1998,6 +2072,8 @@ function App() {
       const nodeMap = new Map(current.nodes.map((node) => [node.id, node]));
       const start = nodeMap.get(element.startNodeId);
       const end = nodeMap.get(element.endNodeId);
+      const section = current.sections.find((item) => item.id === element.sectionId);
+      const sectionLine = section ? `A ${format(section.A)} m^2` : "";
       const force = resultRef.current?.elementForces.find((item) => item.elementId === elementId);
       const hoverLanguage = languageRef.current;
       const snapRatio = start && end ? nearestMemberSnapRatio(hit.point, start, end, currentUnitScale) : null;
@@ -2011,6 +2087,7 @@ function App() {
         ? [
             `${forceStatus(force, hoverLanguage)} ${elementTypeLabel(elementVisualKind(element, nodeMap), hoverLanguage)} ${elementId}`,
             `N ${format(force.axial)}`,
+            sectionLine,
             force.shearY !== undefined ? `Vy ${format(force.shearY)}` : "",
             force.shearZ !== undefined ? `Vz ${format(force.shearZ)}` : "",
             force.momentYStart !== undefined ? `My ${formatMomentPair(force.momentYStart, force.momentYEnd, unitRef.current)} ${momentUnit(unitRef.current)}` : "",
@@ -2021,6 +2098,7 @@ function App() {
         : [
             `${elementTypeLabel(elementVisualKind(element, nodeMap), hoverLanguage)} ${elementId}`,
             start && end ? `L ${format(nodeDistance(start, end))} ${unitLabels[unitRef.current]}` : "",
+            sectionLine,
             deleteLine,
             snapLine,
             hoverLanguage === "en" ? "Internal forces appear after solving" : "求解后显示内力",
@@ -3067,6 +3145,9 @@ function App() {
             <NumberField label={text.modalScale} value={modalDeformScale} onChange={(value) => setModalDeformScale(Math.max(0, value))} />
             <NumberField label={text.modalCount} value={modalModeCount} onChange={(value) => setModalModeCount(Math.max(1, Math.min(24, Math.round(value))))} />
           </div>
+          <button className={sectionAreaDisplay ? "active" : ""} onClick={() => setSectionAreaDisplay((current) => !current)}>
+            <BoxSelect size={17} />{text.areaDisplay}
+          </button>
         </section>
 
         <div className="actions">

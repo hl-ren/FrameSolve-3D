@@ -340,13 +340,13 @@ button:disabled {
 
 .gridInlineControls {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(76px, 0.9fr) minmax(76px, 0.85fr) minmax(0, 1fr);
   align-items: center;
   gap: 5px;
 }
 
 .gridInlineControls .gridStepField {
-  grid-column: 1 / -1;
+  grid-column: auto;
 }
 
 .gridStepField > span {
