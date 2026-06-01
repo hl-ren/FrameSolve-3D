@@ -8,7 +8,7 @@ import { type BoundaryCondition, type DofKey, dofKeys, type ElementForce, type E
 type Tool = "select" | "member" | "support" | "load" | "delete";
 type UnitKey = "m" | "cm" | "mm";
 type LanguageKey = "zh" | "en";
-type ExampleKey = "cube" | "bridge" | "tower" | "cantilever" | "orientalPearl" | "tongjiCivil";
+type ExampleKey = "cube" | "bridge" | "tower" | "cantilever" | "orientalPearl" | "tongjiCivil" | "scriptSpaceGrid" | "scriptBridge" | "scriptTower";
 
 const unitScale: Record<UnitKey, number> = {
   m: 1,
@@ -323,6 +323,67 @@ function bars(pairs: Array<[string, string]>, sectionId = "timber100"): Structur
   return pairs.map(([startNodeId, endNodeId], index) => barElement(`E${index + 1}`, startNodeId, endNodeId, sectionId));
 }
 
+function squareSectionFromArea(id: string, name: string, area: number): Section {
+  const side = Math.sqrt(area);
+  return { id, name, ...rectangularSectionFromDimensions(side, side) };
+}
+
+function scriptTableModel(
+  nodeRows: Array<[number | string, number, number, number]>,
+  sectionRows: Array<[number | string, number]>,
+  elementRows: Array<[number | string, number | string, number | string, number | string]>,
+): StructureModel {
+  const base = emptyModel();
+  const nodes: StructureNode[] = nodeRows.map(([id, x, y, z]) => ({ id: normalizeNodeToken(String(id)), x, y, z }));
+  const scriptSections = sectionRows.map(([id, area]) => squareSectionFromArea(`example-sec-${id}`, `Section ${id}`, area));
+  const sectionMap = new Map(sectionRows.map(([id]) => [String(id), `example-sec-${id}`]));
+  const nodeMap = new Map(nodes.map((node) => [node.id, node]));
+  const usedElementIds: string[] = [];
+  const elements: StructureModel["elements"] = [];
+  const reserveElementId = (preferred: string) => {
+    const id = usedElementIds.includes(preferred) ? nextId("E", usedElementIds) : preferred;
+    usedElementIds.push(id);
+    return id;
+  };
+
+  for (const [id, startText, endText, sectionText] of elementRows) {
+    const startNodeId = normalizeNodeToken(String(startText));
+    const endNodeId = normalizeNodeToken(String(endText));
+    const start = nodeMap.get(startNodeId);
+    const end = nodeMap.get(endNodeId);
+    if (!start || !end || samePoint(start, end)) continue;
+    const points = [
+      { nodeId: startNodeId, ratio: 0 },
+      ...nodes
+        .filter((node) => node.id !== startNodeId && node.id !== endNodeId)
+        .map((node) => ({ nodeId: node.id, ratio: pointOnSegmentRatio(node, start, end) }))
+        .filter((item): item is { nodeId: string; ratio: number } => item.ratio !== null)
+        .sort((a, b) => a.ratio - b.ratio),
+      { nodeId: endNodeId, ratio: 1 },
+    ];
+    const sectionId = sectionMap.get(String(sectionText)) ?? base.sections[0].id;
+    for (let index = 0; index < points.length - 1; index += 1) {
+      elements.push({
+        id: reserveElementId(index === 0 ? normalizeElementToken(String(id)) : nextId("E", usedElementIds)),
+        type: "bar3d",
+        startNodeId: points[index].nodeId,
+        endNodeId: points[index + 1].nodeId,
+        materialId: "wood",
+        sectionId,
+      });
+    }
+  }
+
+  return {
+    ...base,
+    sections: [...base.sections, ...scriptSections],
+    nodes,
+    elements,
+    boundaries: nodes.filter((node) => Math.abs(node.z) < 1e-9).map((node) => ({ nodeId: node.id, ux: true, uy: true, uz: true })),
+    loads: nodes.filter((node) => node.z > 0).filter((_, index) => index % 5 === 0).map((node) => ({ nodeId: node.id, fz: -1200 })),
+  };
+}
+
 const sampleModel = (): StructureModel => ({
   ...emptyModel(),
   nodes: [
@@ -491,6 +552,69 @@ const cantileverTrussModel = (): StructureModel => ({
   loads: [{ nodeId: "N13", fy: 2500, fz: -12000 }],
   nodalMasses: [{ nodeId: "N13", mass: 80 }],
 });
+
+const scriptSpaceGridModel = (): StructureModel => scriptTableModel(
+  [
+    [1, 0, 0, 0], [2, 5, 0, 0], [3, 10, 0, 0],
+    [4, 0, 5, 0], [5, 5, 5, 0], [6, 10, 5, 0],
+    [7, 0, 10, 0], [8, 5, 10, 0], [9, 10, 10, 0],
+    [10, 0, 0, 4], [11, 5, 0, 4], [12, 10, 0, 4],
+    [13, 0, 5, 4], [14, 5, 5, 4], [15, 10, 5, 4],
+    [16, 0, 10, 4], [17, 5, 10, 4], [18, 10, 10, 4],
+  ],
+  [[1, 0.0064], [2, 0.0036], [3, 0.0025]],
+  [
+    [1, 1, 3, 1], [2, 4, 6, 1], [3, 7, 9, 1], [4, 1, 7, 1], [5, 2, 8, 1], [6, 3, 9, 1],
+    [7, 10, 12, 1], [8, 13, 15, 1], [9, 16, 18, 1], [10, 10, 16, 1], [11, 11, 17, 1], [12, 12, 18, 1],
+    [13, 1, 10, 2], [14, 2, 11, 2], [15, 3, 12, 2], [16, 4, 13, 2], [17, 5, 14, 2], [18, 6, 15, 2],
+    [19, 7, 16, 2], [20, 8, 17, 2], [21, 9, 18, 2],
+    [22, 1, 14, 3], [23, 5, 10, 3], [24, 2, 15, 3], [25, 6, 11, 3], [26, 4, 17, 3], [27, 8, 13, 3],
+    [28, 5, 18, 3], [29, 9, 14, 3], [30, 10, 14, 3], [31, 14, 18, 3], [32, 12, 14, 3], [33, 14, 16, 3],
+  ],
+);
+
+const scriptBridgeModel = (): StructureModel => scriptTableModel(
+  [
+    [1, 0, 0, 0], [2, 6, 0, 0], [3, 12, 0, 0], [4, 18, 0, 0], [5, 24, 0, 0],
+    [6, 0, 6, 0], [7, 6, 6, 0], [8, 12, 6, 0], [9, 18, 6, 0], [10, 24, 6, 0],
+    [11, 0, 0, 5], [12, 6, 0, 5], [13, 12, 0, 5], [14, 18, 0, 5], [15, 24, 0, 5],
+    [16, 0, 6, 5], [17, 6, 6, 5], [18, 12, 6, 5], [19, 18, 6, 5], [20, 24, 6, 5],
+  ],
+  [[1, 0.01], [2, 0.0064], [3, 0.0036]],
+  [
+    [1, 1, 5, 1], [2, 6, 10, 1], [3, 11, 15, 1], [4, 16, 20, 1],
+    [5, 1, 6, 1], [6, 2, 7, 1], [7, 3, 8, 1], [8, 4, 9, 1], [9, 5, 10, 1],
+    [10, 11, 16, 1], [11, 12, 17, 1], [12, 13, 18, 1], [13, 14, 19, 1], [14, 15, 20, 1],
+    [15, 1, 11, 2], [16, 2, 12, 2], [17, 3, 13, 2], [18, 4, 14, 2], [19, 5, 15, 2],
+    [20, 6, 16, 2], [21, 7, 17, 2], [22, 8, 18, 2], [23, 9, 19, 2], [24, 10, 20, 2],
+    [25, 1, 12, 3], [26, 2, 11, 3], [27, 2, 13, 3], [28, 3, 12, 3], [29, 3, 14, 3], [30, 4, 13, 3],
+    [31, 4, 15, 3], [32, 5, 14, 3], [33, 6, 17, 3], [34, 7, 16, 3], [35, 7, 18, 3], [36, 8, 17, 3],
+    [37, 8, 19, 3], [38, 9, 18, 3], [39, 9, 20, 3], [40, 10, 19, 3], [41, 11, 17, 3], [42, 12, 16, 3],
+    [43, 12, 18, 3], [44, 13, 17, 3], [45, 13, 19, 3], [46, 14, 18, 3], [47, 14, 20, 3], [48, 15, 19, 3],
+  ],
+);
+
+const scriptTowerModel = (): StructureModel => scriptTableModel(
+  [
+    [1, -5, -5, 0], [2, 5, -5, 0], [3, 5, 5, 0], [4, -5, 5, 0],
+    [5, -4, -4, 6], [6, 4, -4, 6], [7, 4, 4, 6], [8, -4, 4, 6],
+    [9, -3, -3, 12], [10, 3, -3, 12], [11, 3, 3, 12], [12, -3, 3, 12],
+    [13, -2, -2, 18], [14, 2, -2, 18], [15, 2, 2, 18], [16, -2, 2, 18],
+    [17, 0, 0, 24],
+  ],
+  [[1, 0.0144], [2, 0.0081], [3, 0.0049]],
+  [
+    [1, 1, 4, 1], [2, 5, 8, 1], [3, 9, 12, 2], [4, 13, 16, 2],
+    [5, 1, 5, 1], [6, 2, 6, 1], [7, 3, 7, 1], [8, 4, 8, 1],
+    [9, 5, 9, 2], [10, 6, 10, 2], [11, 7, 11, 2], [12, 8, 12, 2],
+    [13, 9, 13, 2], [14, 10, 14, 2], [15, 11, 15, 2], [16, 12, 16, 2],
+    [17, 13, 17, 3], [18, 14, 17, 3], [19, 15, 17, 3], [20, 16, 17, 3],
+    [21, 1, 6, 3], [22, 2, 5, 3], [23, 2, 7, 3], [24, 3, 6, 3], [25, 3, 8, 3], [26, 4, 7, 3],
+    [27, 4, 5, 3], [28, 1, 8, 3], [29, 5, 10, 3], [30, 6, 9, 3], [31, 6, 11, 3], [32, 7, 10, 3],
+    [33, 7, 12, 3], [34, 8, 11, 3], [35, 8, 9, 3], [36, 5, 12, 3], [37, 9, 14, 3], [38, 10, 13, 3],
+    [39, 10, 15, 3], [40, 11, 14, 3], [41, 11, 16, 3], [42, 12, 15, 3], [43, 12, 13, 3], [44, 9, 16, 3],
+  ],
+);
 
 const orientalPearlTrussModel = (): StructureModel => {
   const base = emptyModel();
@@ -724,6 +848,9 @@ const exampleModels: ExampleDefinition[] = [
   { key: "bridge", name: "三维桥式桁架", nameEn: "3D Bridge Truss", unit: "m", gridStep: 5, selectNodeId: "N5", model: bridgeTrussModel },
   { key: "tower", name: "塔架桁架", nameEn: "Tower Truss", unit: "m", gridStep: 5, selectNodeId: "N13", model: towerTrussModel },
   { key: "cantilever", name: "悬臂空间桁架", nameEn: "Cantilever Space Truss", unit: "m", gridStep: 5, selectNodeId: "N13", model: cantileverTrussModel },
+  { key: "scriptSpaceGrid", name: "脚本例子：双层空间网架", nameEn: "Script Example: Double-layer Space Grid", unit: "m", gridStep: 5, selectNodeId: "N14", model: scriptSpaceGridModel },
+  { key: "scriptBridge", name: "脚本例子：三维桥式桁架", nameEn: "Script Example: 3D Bridge Truss", unit: "m", gridStep: 6, selectNodeId: "N18", model: scriptBridgeModel },
+  { key: "scriptTower", name: "脚本例子：空间塔架", nameEn: "Script Example: Space Tower", unit: "m", gridStep: 5, selectNodeId: "N17", model: scriptTowerModel },
   { key: "orientalPearl", name: "东方明珠简化塔桁架", nameEn: "Simplified Oriental Pearl Tower", unit: "m", gridStep: 10, selectNodeId: "TOP", model: orientalPearlTrussModel },
   { key: "tongjiCivil", name: "多层桁架结构", nameEn: "Multi-story Truss Structure", unit: "m", gridStep: 5, selectNodeId: "B3_2_6", model: tongjiCivilBuildingTrussModel },
 ];
@@ -805,7 +932,8 @@ function sectionDisplayRadius(section: Section | undefined, maxArea: number, mod
   const side = Math.sqrt(area);
   const size = Math.max(section?.width ?? side, section?.height ?? side, side);
   if (mode === "area") return THREE.MathUtils.clamp(Math.sqrt(area / Math.PI) * 1.35, 0.014, 0.16);
-  if (mode === "size" || mode === "square") return THREE.MathUtils.clamp(size * 0.5, 0.014, 0.16);
+  if (mode === "size") return THREE.MathUtils.clamp(size * 0.5, 0.014, 0.16);
+  if (mode === "square") return THREE.MathUtils.clamp(side * 0.5, 0.014, 0.16);
   const ratio = maxArea > 1e-12 ? area / maxArea : 0;
   return 0.014 + 0.12 * ratio;
 }
@@ -1353,7 +1481,7 @@ function App() {
   const [activeMode, setActiveMode] = useState(1);
   const [modalAnimate, setModalAnimate] = useState(false);
   const [modalColor, setModalColor] = useState("#ff2d2d");
-  const [memberDisplayMode, setMemberDisplayMode] = useState<MemberDisplayMode>("relativeArea");
+  const [memberDisplayMode, setMemberDisplayMode] = useState<MemberDisplayMode>("square");
   const [memberDisplayColor, setMemberDisplayColor] = useState("#2563eb");
   const [memberDisplayScale, setMemberDisplayScale] = useState(1);
   const [memberColorDialogOpen, setMemberColorDialogOpen] = useState(false);
