@@ -1482,6 +1482,15 @@ function App() {
   const [defaultMaterialId, setDefaultMaterialId] = useState("wood");
   const [defaultSectionId, setDefaultSectionId] = useState("timber100");
   const [sectionNameDraft, setSectionNameDraft] = useState("New section");
+  const [materialDraft, setMaterialDraft] = useState({ E: defaultMaterials[0].E, G: defaultMaterials[0].G, density: defaultMaterials[0].density });
+  const [sectionDraft, setSectionDraft] = useState<Pick<Section, "width" | "height" | "A" | "Iy" | "Iz" | "J">>({
+    width: defaultSections[0].width,
+    height: defaultSections[0].height,
+    A: defaultSections[0].A,
+    Iy: defaultSections[0].Iy,
+    Iz: defaultSections[0].Iz,
+    J: defaultSections[0].J,
+  });
   const [materialOpen, setMaterialOpen] = useState(false);
   const [scriptOpen, setScriptOpen] = useState(false);
   const [displayOpen, setDisplayOpen] = useState(false);
@@ -1569,6 +1578,22 @@ function App() {
   const currentUnitScale = unitScale[unit];
   const gridBounds = useMemo(() => getGridBounds(model.nodes, gridStep), [model.nodes, gridStep]);
   const en = language === "en";
+
+  useEffect(() => {
+    setMaterialDraft({ E: activeMaterial.E, G: activeMaterial.G, density: activeMaterial.density });
+  }, [activeMaterial.id, activeMaterial.E, activeMaterial.G, activeMaterial.density]);
+
+  useEffect(() => {
+    setSectionDraft({
+      width: activeSection.width,
+      height: activeSection.height,
+      A: activeSection.A,
+      Iy: activeSection.Iy,
+      Iz: activeSection.Iz,
+      J: activeSection.J,
+    });
+  }, [activeSection.id, activeSection.width, activeSection.height, activeSection.A, activeSection.Iy, activeSection.Iz, activeSection.J]);
+
   const text = {
     subtitle: en ? "3D frame/truss modeling and solving" : "3D 杆系优先 / 梁单元求解",
     saveProject: en ? "Save project" : "保存项目",
@@ -1617,6 +1642,7 @@ function App() {
     editing: en ? "Editing" : "正在编辑",
     newTag: en ? "New tag" : "新标签",
     addSectionTag: en ? "Add section tag" : "新增截面标签",
+    confirmProperties: en ? "Confirm changes" : "确认修改",
     width: en ? "Width" : "宽度",
     height: en ? "Height" : "高度",
     scriptModel: en ? "Script model" : "脚本建模",
@@ -2553,35 +2579,32 @@ function App() {
     };
   }, [loadZ, gridStep, gridBounds, currentUnitScale, gridVisible]);
 
-  const updateMaterial = (key: "E" | "G" | "density", value: number) => {
-    saveHistory();
-    setModel((current) => ({
-      ...current,
-      materials: current.materials.map((item) => item.id === activeMaterial.id ? { ...item, [key]: value } : item),
-    }));
-    setResult(null);
+  const updateMaterialDraft = (key: "E" | "G" | "density", value: number) => {
+    setMaterialDraft((current) => ({ ...current, [key]: value }));
   };
 
-  const updateSection = (key: "width" | "height" | "A" | "Iy" | "Iz" | "J", value: number) => {
-    saveHistory();
-    setModel((current) => ({
-      ...current,
-      sections: current.sections.map((item) => item.id === activeSection.id ? { ...item, [key]: value } : item),
-    }));
-    setResult(null);
+  const updateSectionDraft = (key: "width" | "height" | "A" | "Iy" | "Iz" | "J", value: number) => {
+    setSectionDraft((current) => ({ ...current, [key]: value }));
   };
 
-  const updateRectangularSectionDimension = (key: "width" | "height", value: number) => {
-    const nextWidth = key === "width" ? value : activeSection.width ?? Math.sqrt(Math.max(activeSection.A, 0));
-    const nextHeight = key === "height" ? value : activeSection.height ?? Math.sqrt(Math.max(activeSection.A, 0));
-    const computed = rectangularSectionFromDimensions(nextWidth, nextHeight);
+  const updateRectangularSectionDimensionDraft = (key: "width" | "height", value: number) => {
+    setSectionDraft((current) => {
+      const nextWidth = key === "width" ? value : current.width ?? Math.sqrt(Math.max(current.A, 0));
+      const nextHeight = key === "height" ? value : current.height ?? Math.sqrt(Math.max(current.A, 0));
+      return rectangularSectionFromDimensions(nextWidth, nextHeight);
+    });
+  };
+
+  const confirmMaterialSectionDraft = () => {
     saveHistory();
     setModel((current) => ({
       ...current,
-      sections: current.sections.map((item) => item.id === activeSection.id ? { ...item, ...computed } : item),
+      materials: current.materials.map((item) => item.id === activeMaterial.id ? { ...item, ...materialDraft } : item),
+      sections: current.sections.map((item) => item.id === activeSection.id ? { ...item, ...sectionDraft } : item),
     }));
     setResult(null);
     setModalResult(null);
+    setError(null);
   };
 
   const createSectionFromActive = () => {
@@ -2590,7 +2613,7 @@ function App() {
     saveHistory();
     setModel((current) => ({
       ...current,
-      sections: [...current.sections, { ...activeSection, id, name }],
+      sections: [...current.sections, { ...activeSection, ...sectionDraft, id, name }],
     }));
     setDefaultSectionId(id);
     setSectionNameDraft(`Section ${model.sections.length + 2}`);
@@ -3312,17 +3335,18 @@ function App() {
                 <input value={sectionNameDraft} onChange={(event) => setSectionNameDraft(event.target.value)} />
               </label>
               <button onClick={createSectionFromActive}><Plus size={17} />{text.addSectionTag}</button>
-              <NumberField label="E Pa" value={activeMaterial.E} onChange={(value) => updateMaterial("E", value)} />
-              <NumberField label="G Pa" value={activeMaterial.G} onChange={(value) => updateMaterial("G", value)} />
-              <NumberField label="rho kg/m3" value={activeMaterial.density} onChange={(value) => updateMaterial("density", value)} />
+              <NumberField label="E Pa" value={materialDraft.E} onChange={(value) => updateMaterialDraft("E", value)} />
+              <NumberField label="G Pa" value={materialDraft.G} onChange={(value) => updateMaterialDraft("G", value)} />
+              <NumberField label="rho kg/m3" value={materialDraft.density} onChange={(value) => updateMaterialDraft("density", value)} />
               <div className="sectionDimensionGrid">
-                <NumberField label={`${text.width} m`} value={activeSection.width ?? 0} onChange={(value) => updateRectangularSectionDimension("width", value)} />
-                <NumberField label={`${text.height} m`} value={activeSection.height ?? 0} onChange={(value) => updateRectangularSectionDimension("height", value)} />
+                <NumberField label={`${text.width} m`} value={sectionDraft.width ?? 0} onChange={(value) => updateRectangularSectionDimensionDraft("width", value)} />
+                <NumberField label={`${text.height} m`} value={sectionDraft.height ?? 0} onChange={(value) => updateRectangularSectionDimensionDraft("height", value)} />
               </div>
-              <NumberField label="A m^2" value={activeSection.A} onChange={(value) => updateSection("A", value)} />
-              <NumberField label="Iy m^4" value={activeSection.Iy} onChange={(value) => updateSection("Iy", value)} />
-              <NumberField label="Iz m^4" value={activeSection.Iz} onChange={(value) => updateSection("Iz", value)} />
-              <NumberField label="J m^4" value={activeSection.J} onChange={(value) => updateSection("J", value)} />
+              <NumberField label="A m^2" value={sectionDraft.A} onChange={(value) => updateSectionDraft("A", value)} />
+              <NumberField label="Iy m^4" value={sectionDraft.Iy} onChange={(value) => updateSectionDraft("Iy", value)} />
+              <NumberField label="Iz m^4" value={sectionDraft.Iz} onChange={(value) => updateSectionDraft("Iz", value)} />
+              <NumberField label="J m^4" value={sectionDraft.J} onChange={(value) => updateSectionDraft("J", value)} />
+              <button className="primary" onClick={confirmMaterialSectionDraft}><CircleDot size={17} />{text.confirmProperties}</button>
             </div>
           )}
         </section>
