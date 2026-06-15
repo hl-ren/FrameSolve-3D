@@ -1145,6 +1145,42 @@ function diagnoseUnderconstrainedMembers(model: StructureModel): ConstraintWarni
   };
 }
 
+function connectedElementIds(model: StructureModel, nodeIds: string[]): string[] {
+  const nodeSet = new Set(nodeIds);
+  return model.elements
+    .filter((element) => nodeSet.has(element.startNodeId) || nodeSet.has(element.endNodeId))
+    .map((element) => element.id);
+}
+
+function canSolveWithRigidNodes(model: StructureModel, rigidNodeIds: string[]): boolean {
+  const rigidSet = new Set(rigidNodeIds);
+  const trial: StructureModel = {
+    ...model,
+    nodes: model.nodes.map((node) => rigidSet.has(node.id) ? { ...node, joint: "rigid" } : node),
+  };
+  try {
+    solveStructure(trial);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function findRigidJointStabilizers(model: StructureModel): string[] {
+  const hingedNodeIds = model.nodes.filter((node) => node.joint === "hinged").map((node) => node.id);
+  if (hingedNodeIds.length === 0 || hingedNodeIds.length > 28) return [];
+  for (const nodeId of hingedNodeIds) {
+    if (canSolveWithRigidNodes(model, [nodeId])) return [nodeId];
+  }
+  for (let i = 0; i < hingedNodeIds.length; i += 1) {
+    for (let j = i + 1; j < hingedNodeIds.length; j += 1) {
+      const pair = [hingedNodeIds[i], hingedNodeIds[j]];
+      if (canSolveWithRigidNodes(model, pair)) return pair;
+    }
+  }
+  return [];
+}
+
 function elementAxesForDisplay(start: StructureNode, end: StructureNode, preferredY?: Vec3): { ex: Vec3; ey: Vec3; ez: Vec3 } {
   const ex = vecNormalize(vecSub(end, start));
   const reference = preferredY ?? (Math.abs(ex.z) < 0.9 ? { x: 0, y: 0, z: 1 } : { x: 0, y: 1, z: 0 });
@@ -1735,18 +1771,22 @@ function formatScriptNumber(value: number): string {
 }
 
 function modelToScript(model: StructureModel): string {
+  const nodeIndex = new Map(model.nodes.map((node, index) => [node.id, index + 1]));
   const sectionIndex = new Map(model.sections.map((section, index) => [section.id, index + 1]));
   const lines: string[] = ["*Node"];
-  for (const node of model.nodes) {
-    lines.push(`${node.id}, ${formatScriptNumber(node.x)}, ${formatScriptNumber(node.y)}, ${formatScriptNumber(node.z)}`);
+  for (let index = 0; index < model.nodes.length; index += 1) {
+    const node = model.nodes[index];
+    lines.push(`${index + 1}, ${formatScriptNumber(node.x)}, ${formatScriptNumber(node.y)}, ${formatScriptNumber(node.z)}`);
   }
   lines.push("*Section");
-  for (const section of model.sections) {
-    lines.push(`${sectionIndex.get(section.id)}, ${formatScriptNumber(section.A)}`);
+  for (let index = 0; index < model.sections.length; index += 1) {
+    const section = model.sections[index];
+    lines.push(`${index + 1}, ${formatScriptNumber(section.A)}`);
   }
   lines.push("*Element");
-  for (const element of model.elements) {
-    lines.push(`${element.id}, ${element.startNodeId}, ${element.endNodeId}, ${sectionIndex.get(element.sectionId) ?? 1}`);
+  for (let index = 0; index < model.elements.length; index += 1) {
+    const element = model.elements[index];
+    lines.push(`${index + 1}, ${nodeIndex.get(element.startNodeId) ?? element.startNodeId}, ${nodeIndex.get(element.endNodeId) ?? element.endNodeId}, ${sectionIndex.get(element.sectionId) ?? 1}`);
   }
   return lines.join("\n");
 }
@@ -2167,12 +2207,17 @@ function App() {
         : null);
     } catch (solveError) {
       const warning = diagnoseUnderconstrainedMembers(prepared.model);
-      setConstraintWarnings(warning);
+      const rigidSuggestion = findRigidJointStabilizers(convertModelToMeters(prepared.model, currentUnitScale));
+      const mergedWarning: ConstraintWarning = {
+        nodeIds: Array.from(new Set([...warning.nodeIds, ...rigidSuggestion])),
+        elementIds: Array.from(new Set([...warning.elementIds, ...connectedElementIds(prepared.model, rigidSuggestion)])),
+      };
+      setConstraintWarnings(mergedWarning);
       setResult(null);
       setModalResult(null);
       const message = solveError instanceof Error ? solveError.message : (en ? "Solve failed." : "求解失败。");
-      setError(warning.nodeIds.length > 0
-        ? `${message} ${en ? `Highlighted ${warning.elementIds.length} potentially underconstrained member(s).` : `已高亮 ${warning.elementIds.length} 根可能约束不足的杆件。`}`
+      setError(mergedWarning.nodeIds.length > 0
+        ? `${message} ${en ? `Highlighted ${mergedWarning.elementIds.length} potentially underconstrained member(s).${rigidSuggestion.length ? ` Try rigid joints at ${rigidSuggestion.join(", ")}.` : ""}` : `已高亮 ${mergedWarning.elementIds.length} 根可能约束不足的杆件。${rigidSuggestion.length ? `建议尝试将 ${rigidSuggestion.join("、")} 设为刚接。` : ""}`}`
         : message);
     }
   };
@@ -2207,11 +2252,16 @@ function App() {
         : null);
     } catch (solveError) {
       const warning = diagnoseUnderconstrainedMembers(prepared.model);
-      setConstraintWarnings(warning);
+      const rigidSuggestion = findRigidJointStabilizers(convertModelToMeters(prepared.model, currentUnitScale));
+      const mergedWarning: ConstraintWarning = {
+        nodeIds: Array.from(new Set([...warning.nodeIds, ...rigidSuggestion])),
+        elementIds: Array.from(new Set([...warning.elementIds, ...connectedElementIds(prepared.model, rigidSuggestion)])),
+      };
+      setConstraintWarnings(mergedWarning);
       setModalResult(null);
       const message = solveError instanceof Error ? solveError.message : (en ? "Eigenvalue solve failed." : "特征值求解失败。");
-      setError(warning.nodeIds.length > 0
-        ? `${message} ${en ? `Highlighted ${warning.elementIds.length} potentially underconstrained member(s).` : `已高亮 ${warning.elementIds.length} 根可能约束不足的杆件。`}`
+      setError(mergedWarning.nodeIds.length > 0
+        ? `${message} ${en ? `Highlighted ${mergedWarning.elementIds.length} potentially underconstrained member(s).${rigidSuggestion.length ? ` Try rigid joints at ${rigidSuggestion.join(", ")}.` : ""}` : `已高亮 ${mergedWarning.elementIds.length} 根可能约束不足的杆件。${rigidSuggestion.length ? `建议尝试将 ${rigidSuggestion.join("、")} 设为刚接。` : ""}`}`
         : message);
     }
   };
@@ -3196,11 +3246,16 @@ function App() {
 
   const checkConstraints = () => {
     const warning = diagnoseUnderconstrainedMembers(model);
-    setConstraintWarnings(warning);
-    setError(warning.nodeIds.length > 0
+    const rigidSuggestion = findRigidJointStabilizers(convertModelToMeters(model, currentUnitScale));
+    const mergedWarning: ConstraintWarning = {
+      nodeIds: Array.from(new Set([...warning.nodeIds, ...rigidSuggestion])),
+      elementIds: Array.from(new Set([...warning.elementIds, ...connectedElementIds(model, rigidSuggestion)])),
+    };
+    setConstraintWarnings(mergedWarning);
+    setError(mergedWarning.nodeIds.length > 0
       ? (en
-          ? `Potential underconstraint: ${warning.nodeIds.length} node(s), ${warning.elementIds.length} related member(s) highlighted.`
-          : `可能约束不足：已高亮 ${warning.nodeIds.length} 个节点、${warning.elementIds.length} 根相关杆件。`)
+          ? `Potential underconstraint: ${mergedWarning.nodeIds.length} node(s), ${mergedWarning.elementIds.length} related member(s) highlighted.${rigidSuggestion.length ? ` Try rigid joints at ${rigidSuggestion.join(", ")}.` : ""}`
+          : `可能约束不足：已高亮 ${mergedWarning.nodeIds.length} 个节点、${mergedWarning.elementIds.length} 根相关杆件。${rigidSuggestion.length ? `建议尝试将 ${rigidSuggestion.join("、")} 设为刚接。` : ""}`)
       : (en ? "No obvious local underconstraint was found." : "未发现明显的局部约束不足。"));
   };
 
