@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { BoxSelect, ChevronDown, ChevronRight, CircleDot, CircleHelp, Eraser, Eye, EyeOff, FilePlus2, FolderOpen, Hammer, Link2, Palette, Play, Plus, RefreshCcw, Save, Sigma, Trash2, Undo2, X } from "lucide-react";
+import { BoxSelect, ChevronDown, ChevronRight, CircleDot, CircleHelp, Eraser, Eye, EyeOff, FilePlus2, FolderOpen, Hammer, Link2, Move, Palette, Play, Plus, RefreshCcw, Save, Sigma, Trash2, Undo2, X } from "lucide-react";
 import { solveModalAnalysis, solveStructure } from "./core/fem";
 import { type BoundaryCondition, type DofKey, dofKeys, type ElementForce, type ElementLoad, type ElementType, type LoadCoordinate, type Material, type ModalResult, type Section, type SolveResult, type StructureModel, type StructureNode, type Vec3 } from "./core/types";
 
-type Tool = "select" | "member" | "support" | "load" | "delete";
+type Tool = "select" | "member" | "support" | "load" | "delete" | "pan";
 type UnitKey = "m" | "cm" | "mm";
 type LanguageKey = "zh" | "en";
 type ExampleKey = "cube" | "bridge" | "tower" | "cantilever" | "orientalPearl" | "tongjiCivil" | "scriptSpaceGrid" | "scriptBridge" | "scriptTower";
@@ -54,6 +54,11 @@ type ElementLoadDraft = {
 };
 
 type ElementVisualKind = "bar" | "beam" | "mixed";
+
+type ConstraintWarning = {
+  nodeIds: string[];
+  elementIds: string[];
+};
 
 type ExampleDefinition = {
   key: ExampleKey;
@@ -1079,6 +1084,67 @@ function vecNormalize(vector: Vec3): Vec3 {
   return { x: vector.x / value, y: vector.y / value, z: vector.z / value };
 }
 
+function vectorRank(vectors: Vec3[], tolerance = 1e-7): number {
+  const basis: Vec3[] = [];
+  for (const vector of vectors) {
+    let residual = vecNormalize(vector);
+    if (vecLength(residual) < tolerance) continue;
+    for (const axis of basis) {
+      const projection = residual.x * axis.x + residual.y * axis.y + residual.z * axis.z;
+      residual = {
+        x: residual.x - projection * axis.x,
+        y: residual.y - projection * axis.y,
+        z: residual.z - projection * axis.z,
+      };
+    }
+    const length = vecLength(residual);
+    if (length > tolerance) basis.push({ x: residual.x / length, y: residual.y / length, z: residual.z / length });
+    if (basis.length === 3) return 3;
+  }
+  return basis.length;
+}
+
+function diagnoseUnderconstrainedMembers(model: StructureModel): ConstraintWarning {
+  const nodeMap = new Map(model.nodes.map((node) => [node.id, node]));
+  const boundaryMap = new Map(model.boundaries.map((boundary) => [boundary.nodeId, boundary]));
+  const incident = new Map<string, StructureModel["elements"]>();
+  for (const element of model.elements) {
+    incident.set(element.startNodeId, [...(incident.get(element.startNodeId) ?? []), element]);
+    incident.set(element.endNodeId, [...(incident.get(element.endNodeId) ?? []), element]);
+  }
+
+  const warningNodeIds = new Set<string>();
+  for (const node of model.nodes) {
+    const elements = incident.get(node.id) ?? [];
+    if (elements.length === 0) continue;
+    const vectors: Vec3[] = [];
+    const boundary = boundaryMap.get(node.id);
+    if (boundary?.ux) vectors.push({ x: 1, y: 0, z: 0 });
+    if (boundary?.uy) vectors.push({ x: 0, y: 1, z: 0 });
+    if (boundary?.uz) vectors.push({ x: 0, y: 0, z: 1 });
+
+    for (const element of elements) {
+      const otherNodeId = element.startNodeId === node.id ? element.endNodeId : element.startNodeId;
+      const other = nodeMap.get(otherNodeId);
+      if (!other) continue;
+      const direction = vecNormalize(vecSub(other, node));
+      if (vecLength(direction) > 1e-9) vectors.push(direction);
+    }
+
+    if (vectorRank(vectors) < 3) warningNodeIds.add(node.id);
+  }
+
+  const warningElementIds = new Set<string>();
+  for (const element of model.elements) {
+    if (warningNodeIds.has(element.startNodeId) || warningNodeIds.has(element.endNodeId)) warningElementIds.add(element.id);
+  }
+
+  return {
+    nodeIds: Array.from(warningNodeIds),
+    elementIds: Array.from(warningElementIds),
+  };
+}
+
 function elementAxesForDisplay(start: StructureNode, end: StructureNode, preferredY?: Vec3): { ex: Vec3; ey: Vec3; ez: Vec3 } {
   const ex = vecNormalize(vecSub(end, start));
   const reference = preferredY ?? (Math.abs(ex.z) < 0.9 ? { x: 0, y: 0, z: 1 } : { x: 0, y: 1, z: 0 });
@@ -1662,6 +1728,29 @@ function parseModelScript(script: string, template: StructureModel, materialId: 
   };
 }
 
+function formatScriptNumber(value: number): string {
+  if (!Number.isFinite(value)) return "0";
+  if (Math.abs(value) < 1e-12) return "0";
+  return Number(value.toPrecision(12)).toString();
+}
+
+function modelToScript(model: StructureModel): string {
+  const sectionIndex = new Map(model.sections.map((section, index) => [section.id, index + 1]));
+  const lines: string[] = ["*Node"];
+  for (const node of model.nodes) {
+    lines.push(`${node.id}, ${formatScriptNumber(node.x)}, ${formatScriptNumber(node.y)}, ${formatScriptNumber(node.z)}`);
+  }
+  lines.push("*Section");
+  for (const section of model.sections) {
+    lines.push(`${sectionIndex.get(section.id)}, ${formatScriptNumber(section.A)}`);
+  }
+  lines.push("*Element");
+  for (const element of model.elements) {
+    lines.push(`${element.id}, ${element.startNodeId}, ${element.endNodeId}, ${sectionIndex.get(element.sectionId) ?? 1}`);
+  }
+  return lines.join("\n");
+}
+
 function App() {
   const [model, setModel] = useState<StructureModel>(() => sampleModel());
   const [tool, setTool] = useState<Tool>("member");
@@ -1717,6 +1806,7 @@ function App() {
   const [memberDisplayColor, setMemberDisplayColor] = useState("#2563eb");
   const [memberDisplayScale, setMemberDisplayScale] = useState(1);
   const [mergeTolerance, setMergeTolerance] = useState(0.01);
+  const [constraintWarnings, setConstraintWarnings] = useState<ConstraintWarning>({ nodeIds: [], elementIds: [] });
   const [memberColorDialogOpen, setMemberColorDialogOpen] = useState(false);
   const [staticDeformScale, setStaticDeformScale] = useState(1);
   const [modalDeformScale, setModalDeformScale] = useState(1);
@@ -1739,6 +1829,7 @@ function App() {
   const memberDisplayModeRef = useRef(memberDisplayMode);
   const memberDisplayColorRef = useRef(memberDisplayColor);
   const memberDisplayScaleRef = useRef(memberDisplayScale);
+  const constraintWarningsRef = useRef(constraintWarnings);
   const languageRef = useRef(language);
   const staticDeformScaleRef = useRef(staticDeformScale);
   const modalDeformScaleRef = useRef(modalDeformScale);
@@ -1764,11 +1855,17 @@ function App() {
   useEffect(() => { memberDisplayModeRef.current = memberDisplayMode; }, [memberDisplayMode]);
   useEffect(() => { memberDisplayColorRef.current = memberDisplayColor; }, [memberDisplayColor]);
   useEffect(() => { memberDisplayScaleRef.current = memberDisplayScale; }, [memberDisplayScale]);
+  useEffect(() => { constraintWarningsRef.current = constraintWarnings; }, [constraintWarnings]);
   useEffect(() => { languageRef.current = language; }, [language]);
   useEffect(() => { staticDeformScaleRef.current = staticDeformScale; }, [staticDeformScale]);
   useEffect(() => { modalDeformScaleRef.current = modalDeformScale; }, [modalDeformScale]);
-  useEffect(() => { sceneDirtyRef.current = true; }, [model, result, modalResult, activeMode, modalAnimate, modalColor, staticDeformScale, modalDeformScale, selectedNode, selectedElement, memberSnapVisible, memberDisplayMode, memberDisplayColor, memberDisplayScale]);
-  useEffect(() => { setModalResult(null); setActiveMode(1); setModalAnimate(false); }, [model]);
+  useEffect(() => { sceneDirtyRef.current = true; }, [model, result, modalResult, activeMode, modalAnimate, modalColor, staticDeformScale, modalDeformScale, selectedNode, selectedElement, memberSnapVisible, memberDisplayMode, memberDisplayColor, memberDisplayScale, constraintWarnings]);
+  useEffect(() => {
+    setModalResult(null);
+    setActiveMode(1);
+    setModalAnimate(false);
+    setConstraintWarnings({ nodeIds: [], elementIds: [] });
+  }, [model]);
 
   const selectedLoad = useMemo(() => model.loads.find((load) => load.nodeId === selectedNode), [model.loads, selectedNode]);
   const selectedMass = useMemo(() => (model.nodalMasses ?? []).find((mass) => mass.nodeId === selectedNode), [model.nodalMasses, selectedNode]);
@@ -1814,6 +1911,7 @@ function App() {
     load: en ? "Loads" : "荷载",
     pickMember: en ? "Pick two points to create a bar member" : "拾取两点新建杆单元",
     selectEdit: en ? "Select and edit" : "选择与编辑",
+    panView: en ? "Pan view" : "平移视图",
     nodes: en ? "Nodes" : "节点",
     elements: en ? "Elements" : "单元",
     selected: en ? "Selected" : "选中",
@@ -1834,6 +1932,8 @@ function App() {
     mergeCloseNodes: en ? "Merge close nodes" : "合并近节点",
     mergeTolerance: en ? "Tolerance" : "容差",
     duplicateMember: en ? "Duplicate member" : "重合杆件",
+    checkConstraints: en ? "Check constraints" : "检查约束",
+    underconstrained: en ? "Underconstrained" : "约束不足",
     deleteSelected: en ? "Delete" : "删除",
     deleteMode: en ? "Click nodes or members to delete; press Esc or Delete again to stop." : "点击节点或梁杆连续删除；按 Esc 或再次点击删除退出。",
     newProject: en ? "New project" : "新建项目",
@@ -1858,6 +1958,7 @@ function App() {
     height: en ? "Height" : "高度",
     scriptModel: en ? "Script model" : "脚本建模",
     importScript: en ? "Import script" : "读取脚本",
+    exportScript: en ? "Export script" : "导出脚本",
     scriptHint: en ? "Abaqus-like block format: *Node, *Section and *Element each on its own line. Element rows are eid, n1, n2, secId when secId exists." : "Abaqus 类似分段格式：*Node、*Section、*Element 各自单独一行；单元行为 eid, n1, n2, secId（若 secId 存在）。",
     spatialGrid: en ? "Spatial Grid" : "空间 Grid",
     hideGrid: en ? "Hide spatial Grid" : "隐藏空间 Grid",
@@ -2065,9 +2166,14 @@ function App() {
             : `已自动拆分 ${prepared.splitCount} 根穿过节点的杆件，移除 ${prepared.droppedLoadCount} 个原梁荷载。`)
         : null);
     } catch (solveError) {
+      const warning = diagnoseUnderconstrainedMembers(prepared.model);
+      setConstraintWarnings(warning);
       setResult(null);
       setModalResult(null);
-      setError(solveError instanceof Error ? solveError.message : (en ? "Solve failed." : "求解失败。"));
+      const message = solveError instanceof Error ? solveError.message : (en ? "Solve failed." : "求解失败。");
+      setError(warning.nodeIds.length > 0
+        ? `${message} ${en ? `Highlighted ${warning.elementIds.length} potentially underconstrained member(s).` : `已高亮 ${warning.elementIds.length} 根可能约束不足的杆件。`}`
+        : message);
     }
   };
 
@@ -2100,8 +2206,13 @@ function App() {
             : `已自动拆分 ${prepared.splitCount} 根穿过节点的杆件，移除 ${prepared.droppedLoadCount} 个原梁荷载。`)
         : null);
     } catch (solveError) {
+      const warning = diagnoseUnderconstrainedMembers(prepared.model);
+      setConstraintWarnings(warning);
       setModalResult(null);
-      setError(solveError instanceof Error ? solveError.message : (en ? "Eigenvalue solve failed." : "特征值求解失败。"));
+      const message = solveError instanceof Error ? solveError.message : (en ? "Eigenvalue solve failed." : "特征值求解失败。");
+      setError(warning.nodeIds.length > 0
+        ? `${message} ${en ? `Highlighted ${warning.elementIds.length} potentially underconstrained member(s).` : `已高亮 ${warning.elementIds.length} 根可能约束不足的杆件。`}`
+        : message);
     }
   };
 
@@ -2203,6 +2314,13 @@ function App() {
       controls.target.fromArray(cameraViewRef.current.target);
     }
     controls.enableDamping = true;
+    let controlTool: Tool | null = null;
+    const syncControlMode = () => {
+      if (controlTool === toolRef.current) return;
+      controlTool = toolRef.current;
+      controls.mouseButtons.LEFT = controlTool === "pan" ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE;
+      controls.mouseButtons.RIGHT = controlTool === "pan" ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN;
+    };
 
     scene.add(new THREE.HemisphereLight("#ffffff", "#b8c1d1", 2.4));
     const key = new THREE.DirectionalLight("#ffffff", 1.2);
@@ -2327,6 +2445,8 @@ function App() {
       const sectionMap = new Map(current.sections.map((section) => [section.id, section]));
       const maxSectionArea = Math.max(1e-12, ...current.elements.map((element) => Math.max(0, sectionMap.get(element.sectionId)?.A ?? 0)));
       const duplicates = duplicateElementMeta(current.elements);
+      const warningElementIds = new Set(constraintWarningsRef.current.elementIds);
+      const warningNodeIds = new Set(constraintWarningsRef.current.nodeIds);
       const memberSnapPositions: number[] = [];
       for (const element of current.elements) {
         const a = nodeMap.get(element.startNodeId);
@@ -2342,10 +2462,13 @@ function App() {
         const sectionRadius = sectionDisplayRadius(sectionMap.get(element.sectionId), maxSectionArea, displayMode) * Math.max(0, memberDisplayScaleRef.current);
         const sectionDriven = displayMode !== "type" && !modalMode;
         const duplicate = duplicates.get(element.id);
+        const isUnderconstrained = warningElementIds.has(element.id);
         const color = isSelectedElement
           ? "#f2a900"
           : modalMode
             ? "#cbd5e1"
+            : isUnderconstrained
+              ? "#f97316"
             : duplicate
               ? "#ec4899"
             : sectionDriven
@@ -2353,7 +2476,7 @@ function App() {
               : !force || Math.abs(force.axial) <= axialTolerance ? elementTypeColor(visualKind) : force.axial > 0 ? "#1b8f4d" : "#d33f32";
         const baseRadius = sectionDriven ? sectionRadius : typeRadius;
         const modalOriginalRadius = displayMode === "square" ? Math.max(0.012, sectionRadius * 0.65) : 0.01;
-        const radius = symbolScale * (isSelectedElement ? 1.8 : 1) * (modalMode ? modalOriginalRadius : sectionDriven || !force || Math.abs(force.axial) <= axialTolerance ? baseRadius : 0.018 + 0.11 * forceRatio);
+        const radius = symbolScale * (isSelectedElement ? 1.8 : isUnderconstrained ? 1.65 : 1) * (modalMode ? modalOriginalRadius : sectionDriven || !force || Math.abs(force.axial) <= axialTolerance ? baseRadius : 0.018 + 0.11 * forceRatio);
         const offsetPoints = offsetDuplicateMemberPoints(toThree(a, currentUnitScale), toThree(b, currentUnitScale), duplicate, symbolScale * 0.12);
         const startPoint = offsetPoints.start;
         const endPoint = offsetPoints.end;
@@ -2410,12 +2533,13 @@ function App() {
 
       for (const node of current.nodes) {
         const isSelectedNode = selectedRef.current === node.id;
+        const isWarningNode = warningNodeIds.has(node.id);
         const isRigidJoint = node.joint ? node.joint === "rigid" : inferredRigidNodeIds.has(node.id);
-        const radius = symbolScale * (isSelectedNode ? 0.12 : 0.085);
+        const radius = symbolScale * (isSelectedNode ? 0.12 : isWarningNode ? 0.105 : 0.085);
         const sphere = new THREE.Mesh(
           new THREE.SphereGeometry(radius, 24, 16),
           new THREE.MeshStandardMaterial({
-            color: isSelectedNode ? "#f2a900" : "#111827",
+            color: isSelectedNode ? "#f2a900" : isWarningNode ? "#f97316" : "#111827",
             roughness: 0.35,
             transparent: !isRigidJoint,
             opacity: isRigidJoint ? 1 : 0.88,
@@ -2569,6 +2693,28 @@ function App() {
       pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
       pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(pointer, camera);
+      const nodeHit = raycaster.intersectObjects(nodePickTargets).find((item) => item.object.userData.nodeId);
+      if (nodeHit?.object.userData.nodeId) {
+        const nodeId = nodeHit.object.userData.nodeId as string;
+        const node = modelRef.current.nodes.find((item) => item.id === nodeId);
+        if (node) {
+          const hoverLanguage = languageRef.current;
+          updateHover({
+            elementId: nodeId,
+            x: event.clientX,
+            y: event.clientY,
+            lines: [
+              `${hoverLanguage === "en" ? "Node" : "节点"} ${node.id}`,
+              `x ${format(node.x)} ${unitLabels[unitRef.current]}`,
+              `y ${format(node.y)} ${unitLabels[unitRef.current]}`,
+              `z ${format(node.z)} ${unitLabels[unitRef.current]}`,
+              constraintWarningsRef.current.nodeIds.includes(node.id) ? (hoverLanguage === "en" ? "Potentially underconstrained" : "可能约束不足") : "",
+              node.joint === "hinged" ? (hoverLanguage === "en" ? "Hinged" : "铰接") : node.joint === "rigid" ? (hoverLanguage === "en" ? "Rigid" : "刚接") : "",
+            ].filter(Boolean),
+          });
+          return;
+        }
+      }
       const hit = raycaster.intersectObjects(memberPickTargets)[0];
       if (!hit?.object.userData.elementId) {
         updateHover(null);
@@ -2592,6 +2738,9 @@ function App() {
       const duplicateLine = duplicateCount > 1
         ? (hoverLanguage === "en" ? `${duplicateCount} duplicate members` : `重合杆件 ${duplicateCount} 根`)
         : "";
+      const constraintLine = constraintWarningsRef.current.elementIds.includes(elementId)
+        ? (hoverLanguage === "en" ? "Potentially underconstrained" : "可能约束不足")
+        : "";
       const snapRatio = start && end ? nearestMemberSnapRatio(hit.point, start, end, currentUnitScale) : null;
       const deleteLine = toolRef.current === "delete"
         ? (hoverLanguage === "en" ? "Click to delete" : "点击删除")
@@ -2608,6 +2757,7 @@ function App() {
             force.shearZ !== undefined ? `Vz ${format(force.shearZ)}` : "",
             force.momentYStart !== undefined ? `My ${formatMomentPair(force.momentYStart, force.momentYEnd, unitRef.current)} ${momentUnit(unitRef.current)}` : "",
             force.momentZStart !== undefined ? `Mz ${formatMomentPair(force.momentZStart, force.momentZEnd, unitRef.current)} ${momentUnit(unitRef.current)}` : "",
+            constraintLine,
             duplicateLine,
             deleteLine,
             snapLine,
@@ -2616,6 +2766,7 @@ function App() {
             `${elementTypeLabel(elementVisualKind(element, nodeMap), hoverLanguage)} ${elementId}`,
             start && end ? `L ${format(nodeDistance(start, end))} ${unitLabels[unitRef.current]}` : "",
             sectionLine,
+            constraintLine,
             duplicateLine,
             deleteLine,
             snapLine,
@@ -2638,6 +2789,7 @@ function App() {
       pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
       pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(pointer, camera);
+      if (toolRef.current === "pan") return;
       const nodeHits = raycaster.intersectObjects(nodePickTargets).filter((hit) => hit.object.userData.nodeId);
       if (nodeHits[0]) {
         const id = nodeHits[0].object.userData.nodeId as string;
@@ -2800,6 +2952,7 @@ function App() {
     let animationId = 0;
     const animate = () => {
       animationId = requestAnimationFrame(animate);
+      syncControlMode();
       controls.update();
       if (sceneDirtyRef.current) {
         draw();
@@ -2932,6 +3085,12 @@ function App() {
     }
   };
 
+  const exportScriptModel = () => {
+    setScriptDraft(modelToScript(model));
+    setScriptOpen(true);
+    setError(en ? "Current model exported to the script editor." : "当前模型已导出到脚本框。");
+  };
+
   const confirmSelectedLoad = () => {
     if (!selectedNode) return;
     saveHistory();
@@ -3033,6 +3192,16 @@ function App() {
     setResult(null);
     setModalResult(null);
     setError(null);
+  };
+
+  const checkConstraints = () => {
+    const warning = diagnoseUnderconstrainedMembers(model);
+    setConstraintWarnings(warning);
+    setError(warning.nodeIds.length > 0
+      ? (en
+          ? `Potential underconstraint: ${warning.nodeIds.length} node(s), ${warning.elementIds.length} related member(s) highlighted.`
+          : `可能约束不足：已高亮 ${warning.nodeIds.length} 个节点、${warning.elementIds.length} 根相关杆件。`)
+      : (en ? "No obvious local underconstraint was found." : "未发现明显的局部约束不足。"));
   };
 
   const mergeCloseNodes = () => {
@@ -3481,6 +3650,7 @@ function App() {
         <div className="toolbar">
           <button className={tool === "member" ? "active" : ""} onClick={() => setTool("member")} title={text.pickMember}><Link2 size={17} />{text.member}</button>
           <button className={tool === "select" ? "active" : ""} onClick={() => setTool("select")} title={text.selectEdit}><BoxSelect size={17} />{text.select}</button>
+          <button className={tool === "pan" ? "active" : ""} onClick={() => { setTool("pan"); setPendingNode(null); }} title={text.panView}><Move size={17} />Pan</button>
           <button className={tool === "support" ? "active" : ""} onClick={() => setTool("support")} title={text.support}><Hammer size={17} />{text.support}</button>
           <button className={tool === "load" ? "active" : ""} onClick={() => setTool("load")} title={text.load}><CircleDot size={17} />{text.load}</button>
           <button className={tool === "delete" ? "active" : ""} onClick={toggleDeleteMode} title={text.deleteSelected} disabled={tool !== "delete" && model.nodes.length === 0 && model.elements.length === 0}><Trash2 size={17} />{text.deleteSelected}</button>
@@ -3512,7 +3682,10 @@ function App() {
             <div className="panelBody">
               <p className="selectionText">{text.scriptHint}</p>
               <textarea className="scriptInput" value={scriptDraft} onChange={(event) => setScriptDraft(event.target.value)} spellCheck={false} />
-              <button onClick={importScriptModel}><FolderOpen size={17} />{text.importScript}</button>
+              <div className="scriptActions">
+                <button onClick={importScriptModel}><FolderOpen size={17} />{text.importScript}</button>
+                <button onClick={exportScriptModel} disabled={model.nodes.length === 0 && model.elements.length === 0}><Save size={17} />{text.exportScript}</button>
+              </div>
             </div>
           )}
         </section>
@@ -3550,6 +3723,7 @@ function App() {
             </div>
           )}
           <button onClick={autoClassifyElements} disabled={model.elements.length === 0}><RefreshCcw size={17} />{text.autoClassify}</button>
+          <button onClick={checkConstraints} disabled={model.elements.length === 0}><Eye size={17} />{text.checkConstraints}</button>
           <div className="mergeControls">
             <NumberField label={`${text.mergeTolerance} ${unitLabels[unit]}`} value={mergeTolerance} onChange={(value) => setMergeTolerance(Math.max(0, value))} />
             <button onClick={mergeCloseNodes} disabled={model.nodes.length < 2}><Link2 size={17} />{text.mergeCloseNodes}</button>

@@ -363,6 +363,12 @@ button:disabled {
   padding-top: 5px;
 }
 
+.scriptActions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+}
+
 .rangeField {
   display: grid;
   gap: 5px;
