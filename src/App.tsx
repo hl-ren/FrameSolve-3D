@@ -1265,6 +1265,10 @@ function scaleBoundaryValues(boundary: BoundaryCondition, factor: number): Bound
   };
 }
 
+function boundaryHasActiveDof(boundary: BoundaryCondition): boolean {
+  return dofKeys.some((key) => Boolean(boundary[key]));
+}
+
 function isLoadCoordinate(value: unknown): value is LoadCoordinate {
   return value === "global" || value === "local";
 }
@@ -2184,7 +2188,7 @@ function App() {
 
       for (const boundary of current.boundaries) {
         const node = nodeMap.get(boundary.nodeId);
-        if (!node) continue;
+        if (!node || !boundaryHasActiveDof(boundary)) continue;
         const block = new THREE.Mesh(
           new THREE.BoxGeometry(0.36 * symbolScale, 0.18 * symbolScale, 0.36 * symbolScale),
           new THREE.MeshStandardMaterial({ color: "#2d6a4f" }),
@@ -2714,9 +2718,10 @@ function App() {
       const found = current.boundaries.find((item) => item.nodeId === selectedNode);
       const rest = current.boundaries.filter((item) => item.nodeId !== selectedNode);
       const next = { nodeId: selectedNode, ...(found ?? {}), [key]: !(found?.[key] ?? false) };
-      return { ...current, boundaries: [...rest, next] };
+      return { ...current, boundaries: boundaryHasActiveDof(next) ? [...rest, next] : rest };
     });
     setResult(null);
+    setModalResult(null);
   };
 
   const updateBoundaryValue = (key: DofKey, value: number) => {
