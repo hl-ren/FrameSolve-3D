@@ -1126,6 +1126,42 @@ function samePoint(a: Vec3, b: Vec3): boolean {
   return Math.abs(a.x - b.x) < 1e-6 && Math.abs(a.y - b.y) < 1e-6 && Math.abs(a.z - b.z) < 1e-6;
 }
 
+function elementPairKey(startNodeId: string, endNodeId: string): string {
+  return startNodeId < endNodeId ? `${startNodeId}|${endNodeId}` : `${endNodeId}|${startNodeId}`;
+}
+
+function duplicateElementGroups(elements: StructureModel["elements"]): Map<string, string[]> {
+  const groups = new Map<string, string[]>();
+  for (const element of elements) {
+    const key = elementPairKey(element.startNodeId, element.endNodeId);
+    groups.set(key, [...(groups.get(key) ?? []), element.id]);
+  }
+  return groups;
+}
+
+function duplicateElementMeta(elements: StructureModel["elements"]): Map<string, { index: number; count: number }> {
+  const meta = new Map<string, { index: number; count: number }>();
+  for (const ids of duplicateElementGroups(elements).values()) {
+    if (ids.length <= 1) continue;
+    ids.forEach((id, index) => meta.set(id, { index, count: ids.length }));
+  }
+  return meta;
+}
+
+function offsetDuplicateMemberPoints(startPoint: THREE.Vector3, endPoint: THREE.Vector3, duplicate: { index: number; count: number } | undefined, offsetScale: number): { start: THREE.Vector3; end: THREE.Vector3 } {
+  const start = startPoint.clone();
+  const end = endPoint.clone();
+  if (!duplicate || duplicate.count <= 1) return { start, end };
+  const direction = end.clone().sub(start);
+  if (direction.lengthSq() < 1e-12) return { start, end };
+  direction.normalize();
+  let normal = new THREE.Vector3().crossVectors(direction, new THREE.Vector3(0, 1, 0));
+  if (normal.lengthSq() < 1e-10) normal = new THREE.Vector3().crossVectors(direction, new THREE.Vector3(1, 0, 0));
+  if (normal.lengthSq() < 1e-10) return { start, end };
+  normal.normalize().multiplyScalar((duplicate.index - (duplicate.count - 1) / 2) * offsetScale);
+  return { start: start.add(normal), end: end.add(normal) };
+}
+
 function pointOnSegmentRatio(point: Vec3, start: Vec3, end: Vec3): number | null {
   const ab = vecSub(end, start);
   const ap = vecSub(point, start);
@@ -1178,6 +1214,61 @@ function splitElementsAtNode(model: StructureModel, node: StructureNode): { mode
   };
 }
 
+function splitElementsAtIntermediateNodes(model: StructureModel): { model: StructureModel; splitCount: number; droppedLoadCount: number } {
+  const nodeMap = new Map(model.nodes.map((item) => [item.id, item]));
+  const usedElementIds = model.elements.map((element) => element.id);
+  const splitElementIds = new Set<string>();
+  const elements: StructureModel["elements"] = [];
+
+  for (const element of model.elements) {
+    const start = nodeMap.get(element.startNodeId);
+    const end = nodeMap.get(element.endNodeId);
+    if (!start || !end) {
+      elements.push(element);
+      continue;
+    }
+
+    const intermediate = model.nodes
+      .filter((node) => node.id !== element.startNodeId && node.id !== element.endNodeId)
+      .map((node) => ({ nodeId: node.id, ratio: pointOnSegmentRatio(node, start, end) }))
+      .filter((item): item is { nodeId: string; ratio: number } => item.ratio !== null)
+      .sort((a, b) => a.ratio - b.ratio);
+
+    if (intermediate.length === 0) {
+      elements.push(element);
+      continue;
+    }
+
+    const points = [
+      { nodeId: element.startNodeId, ratio: 0 },
+      ...intermediate,
+      { nodeId: element.endNodeId, ratio: 1 },
+    ];
+    splitElementIds.add(element.id);
+    for (let index = 0; index < points.length - 1; index += 1) {
+      if (points[index].nodeId === points[index + 1].nodeId) continue;
+      const id = index === 0 ? element.id : nextId("E", usedElementIds);
+      if (index > 0) usedElementIds.push(id);
+      elements.push({
+        ...element,
+        id,
+        startNodeId: points[index].nodeId,
+        endNodeId: points[index + 1].nodeId,
+        releaseStart: index === 0 ? element.releaseStart : undefined,
+        releaseEnd: index === points.length - 2 ? element.releaseEnd : undefined,
+      });
+    }
+  }
+
+  if (splitElementIds.size === 0) return { model, splitCount: 0, droppedLoadCount: 0 };
+  const elementLoads = (model.elementLoads ?? []).filter((load) => !splitElementIds.has(load.elementId));
+  return {
+    model: { ...model, elements, elementLoads },
+    splitCount: splitElementIds.size,
+    droppedLoadCount: (model.elementLoads ?? []).length - elementLoads.length,
+  };
+}
+
 function insertNodeAndSplit(model: StructureModel, node: StructureNode, fixedOnBasePlane: boolean): { model: StructureModel; splitCount: number; droppedLoadCount: number } {
   const exists = model.nodes.some((item) => item.id === node.id);
   const nextModel: StructureModel = {
@@ -1210,6 +1301,118 @@ function deleteNodeFromModel(model: StructureModel, nodeId: string): StructureMo
     loads: model.loads.filter((load) => load.nodeId !== nodeId),
     nodalMasses: (model.nodalMasses ?? []).filter((mass) => mass.nodeId !== nodeId),
     elementLoads: (model.elementLoads ?? []).filter((load) => !removedElementIds.has(load.elementId)),
+  };
+}
+
+function mergeBoundaryGroup(nodeId: string, items: BoundaryCondition[]): BoundaryCondition | null {
+  const boundary: BoundaryCondition = { nodeId };
+  const values: Partial<Record<DofKey, number>> = {};
+  for (const key of dofKeys) {
+    if (items.some((item) => Boolean(item[key]))) boundary[key] = true;
+    const valueOwner = items.find((item) => item.values?.[key] !== undefined);
+    if (valueOwner?.values?.[key] !== undefined) values[key] = valueOwner.values[key];
+  }
+  if (Object.keys(values).length > 0) boundary.values = values;
+  return boundaryHasActiveDof(boundary) ? boundary : null;
+}
+
+function mergeCloseNodesInModel(model: StructureModel, tolerance: number): { model: StructureModel; mergedCount: number; removedElementCount: number; nodeIdMap: Map<string, string> } {
+  const tol = Math.max(0, tolerance);
+  const nodeIdMap = new Map<string, string>();
+  if (tol <= 0 || model.nodes.length <= 1) {
+    model.nodes.forEach((node) => nodeIdMap.set(node.id, node.id));
+    return { model, mergedCount: 0, removedElementCount: 0, nodeIdMap };
+  }
+
+  const visited = new Set<string>();
+  const mergedNodes: StructureNode[] = [];
+  let mergedCount = 0;
+
+  for (const seed of model.nodes) {
+    if (visited.has(seed.id)) continue;
+    const group: StructureNode[] = [];
+    const queue: StructureNode[] = [seed];
+    visited.add(seed.id);
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      group.push(current);
+      for (const candidate of model.nodes) {
+        if (visited.has(candidate.id)) continue;
+        if (nodeDistance(current, candidate) <= tol) {
+          visited.add(candidate.id);
+          queue.push(candidate);
+        }
+      }
+    }
+
+    const representative = group[0];
+    const merged = group.length > 1;
+    if (merged) mergedCount += group.length - 1;
+    const nextNode: StructureNode = {
+      ...representative,
+      x: Number((group.reduce((sum, node) => sum + node.x, 0) / group.length).toFixed(9)),
+      y: Number((group.reduce((sum, node) => sum + node.y, 0) / group.length).toFixed(9)),
+      z: Number((group.reduce((sum, node) => sum + node.z, 0) / group.length).toFixed(9)),
+      joint: merged ? "hinged" : representative.joint,
+    };
+    mergedNodes.push(nextNode);
+    group.forEach((node) => nodeIdMap.set(node.id, representative.id));
+  }
+
+  const removedElementIds = new Set<string>();
+  const elements = model.elements.flatMap((element) => {
+    const startNodeId = nodeIdMap.get(element.startNodeId) ?? element.startNodeId;
+    const endNodeId = nodeIdMap.get(element.endNodeId) ?? element.endNodeId;
+    if (startNodeId === endNodeId) {
+      removedElementIds.add(element.id);
+      return [];
+    }
+    return [{ ...element, startNodeId, endNodeId }];
+  });
+
+  const boundaryMap = new Map<string, BoundaryCondition[]>();
+  for (const boundary of model.boundaries) {
+    const nodeId = nodeIdMap.get(boundary.nodeId) ?? boundary.nodeId;
+    boundaryMap.set(nodeId, [...(boundaryMap.get(nodeId) ?? []), { ...boundary, nodeId }]);
+  }
+  const boundaries = Array.from(boundaryMap.entries())
+    .map(([nodeId, items]) => mergeBoundaryGroup(nodeId, items))
+    .filter((item): item is BoundaryCondition => Boolean(item));
+
+  const loadMap = new Map<string, StructureModel["loads"][number]>();
+  for (const load of model.loads) {
+    const nodeId = nodeIdMap.get(load.nodeId) ?? load.nodeId;
+    const current = loadMap.get(nodeId) ?? { nodeId, fx: 0, fy: 0, fz: 0, mx: 0, my: 0, mz: 0 };
+    loadMap.set(nodeId, {
+      nodeId,
+      fx: (current.fx ?? 0) + (load.fx ?? 0),
+      fy: (current.fy ?? 0) + (load.fy ?? 0),
+      fz: (current.fz ?? 0) + (load.fz ?? 0),
+      mx: (current.mx ?? 0) + (load.mx ?? 0),
+      my: (current.my ?? 0) + (load.my ?? 0),
+      mz: (current.mz ?? 0) + (load.mz ?? 0),
+    });
+  }
+
+  const massMap = new Map<string, number>();
+  for (const mass of model.nodalMasses ?? []) {
+    const nodeId = nodeIdMap.get(mass.nodeId) ?? mass.nodeId;
+    massMap.set(nodeId, (massMap.get(nodeId) ?? 0) + Math.max(0, mass.mass));
+  }
+
+  return {
+    model: {
+      ...model,
+      nodes: mergedNodes,
+      elements,
+      boundaries,
+      loads: Array.from(loadMap.values()).filter((load) => Math.hypot(load.fx ?? 0, load.fy ?? 0, load.fz ?? 0, load.mx ?? 0, load.my ?? 0, load.mz ?? 0) > 0),
+      nodalMasses: Array.from(massMap.entries()).filter(([, mass]) => mass > 0).map(([nodeId, mass]) => ({ nodeId, mass })),
+      elementLoads: (model.elementLoads ?? []).filter((load) => !removedElementIds.has(load.elementId)),
+    },
+    mergedCount,
+    removedElementCount: removedElementIds.size,
+    nodeIdMap,
   };
 }
 
@@ -1513,6 +1716,7 @@ function App() {
   const [memberDisplayMode, setMemberDisplayMode] = useState<MemberDisplayMode>("square");
   const [memberDisplayColor, setMemberDisplayColor] = useState("#2563eb");
   const [memberDisplayScale, setMemberDisplayScale] = useState(1);
+  const [mergeTolerance, setMergeTolerance] = useState(0.01);
   const [memberColorDialogOpen, setMemberColorDialogOpen] = useState(false);
   const [staticDeformScale, setStaticDeformScale] = useState(1);
   const [modalDeformScale, setModalDeformScale] = useState(1);
@@ -1627,6 +1831,9 @@ function App() {
     barElement: en ? "Bar element" : "杆单元",
     beamElement: en ? "Beam element" : "梁单元",
     autoClassify: en ? "Auto classify elements" : "自动判定单元",
+    mergeCloseNodes: en ? "Merge close nodes" : "合并近节点",
+    mergeTolerance: en ? "Tolerance" : "容差",
+    duplicateMember: en ? "Duplicate member" : "重合杆件",
     deleteSelected: en ? "Delete" : "删除",
     deleteMode: en ? "Click nodes or members to delete; press Esc or Delete again to stop." : "点击节点或梁杆连续删除；按 Esc 或再次点击删除退出。",
     newProject: en ? "New project" : "新建项目",
@@ -1830,7 +2037,13 @@ function App() {
   }, [clearSelection, undo]);
 
   const runSolve = () => {
-    const scaleError = solveScaleError(model, "static", language);
+    const prepared = splitElementsAtIntermediateNodes(model);
+    if (prepared.splitCount > 0) {
+      saveHistory();
+      setModel(prepared.model);
+      setSelectedElement(null);
+    }
+    const scaleError = solveScaleError(prepared.model, "static", language);
     if (scaleError) {
       setResult(null);
       setModalResult(null);
@@ -1839,14 +2052,18 @@ function App() {
       return;
     }
     try {
-      const solved = solveStructure(convertModelToMeters(model, currentUnitScale));
+      const solved = solveStructure(convertModelToMeters(prepared.model, currentUnitScale));
       setResult(solved);
       setResultPopupOpen(false);
       setModalResult(null);
       setActiveMode(1);
       setModalAnimate(false);
       setMemberDisplayMode("type");
-      setError(null);
+      setError(prepared.splitCount > 0
+        ? (en
+            ? `Automatically split ${prepared.splitCount} member(s) passing through existing nodes. Removed ${prepared.droppedLoadCount} beam load(s).`
+            : `已自动拆分 ${prepared.splitCount} 根穿过节点的杆件，移除 ${prepared.droppedLoadCount} 个原梁荷载。`)
+        : null);
     } catch (solveError) {
       setResult(null);
       setModalResult(null);
@@ -1855,7 +2072,13 @@ function App() {
   };
 
   const runModalAnalysis = () => {
-    const scaleError = solveScaleError(model, "modal", language);
+    const prepared = splitElementsAtIntermediateNodes(model);
+    if (prepared.splitCount > 0) {
+      saveHistory();
+      setModel(prepared.model);
+      setSelectedElement(null);
+    }
+    const scaleError = solveScaleError(prepared.model, "modal", language);
     if (scaleError) {
       setResult(null);
       setModalResult(null);
@@ -1865,13 +2088,17 @@ function App() {
     }
     try {
       const modeCount = Math.max(1, Math.min(24, Math.round(modalModeCount)));
-      const solved = solveModalAnalysis(convertModelToMeters(model, currentUnitScale), modeCount);
+      const solved = solveModalAnalysis(convertModelToMeters(prepared.model, currentUnitScale), modeCount);
       setModalResult(solved);
       setResultPopupOpen(true);
       setActiveMode(solved.modes[0]?.mode ?? 1);
       setModalAnimate(false);
       setResult(null);
-      setError(null);
+      setError(prepared.splitCount > 0
+        ? (en
+            ? `Automatically split ${prepared.splitCount} member(s) passing through existing nodes. Removed ${prepared.droppedLoadCount} beam load(s).`
+            : `已自动拆分 ${prepared.splitCount} 根穿过节点的杆件，移除 ${prepared.droppedLoadCount} 个原梁荷载。`)
+        : null);
     } catch (solveError) {
       setModalResult(null);
       setError(solveError instanceof Error ? solveError.message : (en ? "Eigenvalue solve failed." : "特征值求解失败。"));
@@ -2052,6 +2279,7 @@ function App() {
       const nodeMap = new Map(current.nodes.map((node) => [node.id, node]));
       const sectionMap = new Map(current.sections.map((section) => [section.id, section]));
       const maxSectionArea = Math.max(1e-12, ...current.elements.map((element) => Math.max(0, sectionMap.get(element.sectionId)?.A ?? 0)));
+      const duplicates = duplicateElementMeta(current.elements);
       const modeShapeScale = sceneSize * 0.12 * Math.max(0, modalDeformScaleRef.current);
       const modeRelativeOmega = modalModes[0] ? Math.max(0.25, Math.min(4, modalMode.omega / modalModes[0].omega)) : 1;
       const modePhase = modalAnimateRef.current ? Math.sin((performance.now() / 1000) * 2.2 * modeRelativeOmega) : 1;
@@ -2062,9 +2290,12 @@ function App() {
         const displayMode = memberDisplayModeRef.current;
         const sectionDriven = displayMode !== "type";
         const radius = symbolScale * Math.max(0, memberDisplayScaleRef.current) * (sectionDriven ? sectionDisplayRadius(sectionMap.get(element.sectionId), maxSectionArea, displayMode) : 0.034);
+        const modalStart = toThree(a, currentUnitScale, modalMode.displacements[a.id], modeShapeScale * modePhase);
+        const modalEnd = toThree(b, currentUnitScale, modalMode.displacements[b.id], modeShapeScale * modePhase);
+        const offsetPoints = offsetDuplicateMemberPoints(modalStart, modalEnd, duplicates.get(element.id), symbolScale * 0.12);
         modalContent.add(createDisplayMember(
-          toThree(a, currentUnitScale, modalMode.displacements[a.id], modeShapeScale * modePhase),
-          toThree(b, currentUnitScale, modalMode.displacements[b.id], modeShapeScale * modePhase),
+          offsetPoints.start,
+          offsetPoints.end,
           radius,
           modalColorRef.current,
           1,
@@ -2095,6 +2326,7 @@ function App() {
       const maxAxial = Math.max(1, ...(solved?.elementForces.map((force) => Math.abs(force.axial)) ?? [0]));
       const sectionMap = new Map(current.sections.map((section) => [section.id, section]));
       const maxSectionArea = Math.max(1e-12, ...current.elements.map((element) => Math.max(0, sectionMap.get(element.sectionId)?.A ?? 0)));
+      const duplicates = duplicateElementMeta(current.elements);
       const memberSnapPositions: number[] = [];
       for (const element of current.elements) {
         const a = nodeMap.get(element.startNodeId);
@@ -2109,18 +2341,22 @@ function App() {
         const displayMode = memberDisplayModeRef.current;
         const sectionRadius = sectionDisplayRadius(sectionMap.get(element.sectionId), maxSectionArea, displayMode) * Math.max(0, memberDisplayScaleRef.current);
         const sectionDriven = displayMode !== "type" && !modalMode;
+        const duplicate = duplicates.get(element.id);
         const color = isSelectedElement
           ? "#f2a900"
           : modalMode
             ? "#cbd5e1"
+            : duplicate
+              ? "#ec4899"
             : sectionDriven
               ? memberDisplayColorRef.current
               : !force || Math.abs(force.axial) <= axialTolerance ? elementTypeColor(visualKind) : force.axial > 0 ? "#1b8f4d" : "#d33f32";
         const baseRadius = sectionDriven ? sectionRadius : typeRadius;
         const modalOriginalRadius = displayMode === "square" ? Math.max(0.012, sectionRadius * 0.65) : 0.01;
         const radius = symbolScale * (isSelectedElement ? 1.8 : 1) * (modalMode ? modalOriginalRadius : sectionDriven || !force || Math.abs(force.axial) <= axialTolerance ? baseRadius : 0.018 + 0.11 * forceRatio);
-        const startPoint = toThree(a, currentUnitScale);
-        const endPoint = toThree(b, currentUnitScale);
+        const offsetPoints = offsetDuplicateMemberPoints(toThree(a, currentUnitScale), toThree(b, currentUnitScale), duplicate, symbolScale * 0.12);
+        const startPoint = offsetPoints.start;
+        const endPoint = offsetPoints.end;
         const memberMesh = createDisplayMember(startPoint, endPoint, radius, color, modalMode ? 0.62 : 1, displayMode === "square" ? "square" : "round");
         memberMesh.userData.elementId = element.id;
         content.add(memberMesh);
@@ -2148,9 +2384,15 @@ function App() {
         }
 
         if (solved) {
-          const deformed = new THREE.BufferGeometry().setFromPoints([
+          const deformedOffset = offsetDuplicateMemberPoints(
             toThree(a, currentUnitScale, solved.displacements[a.id], displacementScale),
             toThree(b, currentUnitScale, solved.displacements[b.id], displacementScale),
+            duplicate,
+            symbolScale * 0.12,
+          );
+          const deformed = new THREE.BufferGeometry().setFromPoints([
+            deformedOffset.start,
+            deformedOffset.end,
           ]);
           content.add(new THREE.Line(deformed, new THREE.LineBasicMaterial({ color: "#e4572e" })));
         }
@@ -2346,6 +2588,10 @@ function App() {
       const sectionLine = section ? `A ${format(section.A)} m^2` : "";
       const force = resultRef.current?.elementForces.find((item) => item.elementId === elementId);
       const hoverLanguage = languageRef.current;
+      const duplicateCount = duplicateElementGroups(current.elements).get(elementPairKey(element.startNodeId, element.endNodeId))?.length ?? 1;
+      const duplicateLine = duplicateCount > 1
+        ? (hoverLanguage === "en" ? `${duplicateCount} duplicate members` : `重合杆件 ${duplicateCount} 根`)
+        : "";
       const snapRatio = start && end ? nearestMemberSnapRatio(hit.point, start, end, currentUnitScale) : null;
       const deleteLine = toolRef.current === "delete"
         ? (hoverLanguage === "en" ? "Click to delete" : "点击删除")
@@ -2362,6 +2608,7 @@ function App() {
             force.shearZ !== undefined ? `Vz ${format(force.shearZ)}` : "",
             force.momentYStart !== undefined ? `My ${formatMomentPair(force.momentYStart, force.momentYEnd, unitRef.current)} ${momentUnit(unitRef.current)}` : "",
             force.momentZStart !== undefined ? `Mz ${formatMomentPair(force.momentZStart, force.momentZEnd, unitRef.current)} ${momentUnit(unitRef.current)}` : "",
+            duplicateLine,
             deleteLine,
             snapLine,
           ].filter(Boolean)
@@ -2369,6 +2616,7 @@ function App() {
             `${elementTypeLabel(elementVisualKind(element, nodeMap), hoverLanguage)} ${elementId}`,
             start && end ? `L ${format(nodeDistance(start, end))} ${unitLabels[unitRef.current]}` : "",
             sectionLine,
+            duplicateLine,
             deleteLine,
             snapLine,
             hoverLanguage === "en" ? "Internal forces appear after solving" : "求解后显示内力",
@@ -2510,22 +2758,32 @@ function App() {
         return;
       }
       saveHistory();
-      setModel((current) => ({
+      const current = modelRef.current;
+      const next = {
         ...current,
         elements: [
           ...current.elements,
           {
             id: nextId("E", current.elements.map((element) => element.id)),
-            type: "bar3d",
+            type: "bar3d" as const,
             startNodeId: pendingRef.current!,
             endNodeId: nodeId,
             materialId: defaultMaterialRef.current,
             sectionId: defaultSectionRef.current,
           },
         ],
-      }));
+      };
+      const split = splitElementsAtIntermediateNodes(next);
+      modelRef.current = split.model;
+      setModel(split.model);
       setPendingNode(null);
       setResult(null);
+      setModalResult(null);
+      setError(split.splitCount > 0
+        ? (languageRef.current === "en"
+            ? `Automatically split ${split.splitCount} member(s) passing through existing nodes. Removed ${split.droppedLoadCount} beam load(s).`
+            : `已自动拆分 ${split.splitCount} 根穿过节点的杆件，移除 ${split.droppedLoadCount} 个原梁荷载。`)
+        : null);
     };
 
     renderer.domElement.addEventListener("pointerdown", onPointerDown);
@@ -2777,6 +3035,27 @@ function App() {
     setError(null);
   };
 
+  const mergeCloseNodes = () => {
+    const merged = mergeCloseNodesInModel(model, mergeTolerance);
+    if (merged.mergedCount === 0) {
+      setError(en
+        ? `No nodes within ${format(mergeTolerance)} ${unitLabels[unit]}.`
+        : `未发现 ${format(mergeTolerance)} ${unitLabels[unit]} 容差内的近节点。`);
+      return;
+    }
+    const split = splitElementsAtIntermediateNodes(merged.model);
+    saveHistory();
+    setModel(split.model);
+    setSelectedNode(selectedNode ? merged.nodeIdMap.get(selectedNode) ?? null : null);
+    setSelectedElement(null);
+    setPendingNode(null);
+    setResult(null);
+    setModalResult(null);
+    setError(en
+      ? `Merged ${merged.mergedCount} close node(s). Removed ${merged.removedElementCount} zero-length member(s). Split ${split.splitCount} through-node member(s). Merged nodes are hinged.`
+      : `已合并 ${merged.mergedCount} 个近节点，删除 ${merged.removedElementCount} 根零长杆件，并拆分 ${split.splitCount} 根穿过节点的杆件；合并节点已设为铰接。`);
+  };
+
   const clearModel = () => {
     saveHistory();
     setModel(emptyModel());
@@ -2932,13 +3211,19 @@ function App() {
             },
           ],
         };
+    const split = splitElementsAtIntermediateNodes(nextModel);
     saveHistory();
-    setModel(nextModel);
+    setModel(split.model);
     setSelectedNode(targetNodeId);
     setSelectedElement(null);
     setPendingNode(null);
     setResult(null);
-    setError(inserted.droppedLoadCount > 0 ? (en ? "The inserted node split a member; existing beam loads on the original member were removed. Please set them again." : "插入节点已分割构件；原构件梁荷载已移除，请重新设置。") : null);
+    setModalResult(null);
+    setError(inserted.droppedLoadCount > 0 || split.splitCount > 0
+      ? (en
+          ? `The model was split at existing nodes. Removed ${inserted.droppedLoadCount + split.droppedLoadCount} beam load(s); please set them again where needed.`
+          : `模型已按已有节点自动拆分杆件；移除 ${inserted.droppedLoadCount + split.droppedLoadCount} 个原梁荷载，请按需要重新设置。`)
+      : null);
   };
 
   const createCoordinateNode = () => {
@@ -3015,8 +3300,9 @@ function App() {
         elementLoads: parsed.model.elementLoads ?? [],
         nodalMasses: parsed.model.nodalMasses ?? [],
       };
+      const split = splitElementsAtIntermediateNodes(nextModel);
       saveHistory();
-      setModel(nextModel);
+      setModel(split.model);
       setUnit(nextUnit);
       setGridStep(toFiniteNumber(parsed.gridStep, defaultGridStepByUnit[nextUnit]));
       setGridVisible(typeof parsed.gridVisible === "boolean" ? parsed.gridVisible : true);
@@ -3024,13 +3310,18 @@ function App() {
       setLoadZ(toFiniteNumber(parsed.loadZ, -15000));
       setOffset(toOffset(parsed.offset, { dx: 5, dy: 0, dz: 0 }));
       setCoordinateNode(toVec3(parsed.coordinateNode, { x: 0, y: 0, z: 0 }));
-      setDefaultMaterialId(nextModel.materials.some((material) => material.id === parsed.defaultMaterialId) ? parsed.defaultMaterialId! : nextModel.materials[0]?.id ?? "wood");
-      setDefaultSectionId(nextModel.sections.some((section) => section.id === parsed.defaultSectionId) ? parsed.defaultSectionId! : nextModel.sections[0]?.id ?? "timber100");
-      setSelectedNode(nextModel.nodes[0]?.id ?? null);
+      setDefaultMaterialId(split.model.materials.some((material) => material.id === parsed.defaultMaterialId) ? parsed.defaultMaterialId! : split.model.materials[0]?.id ?? "wood");
+      setDefaultSectionId(split.model.sections.some((section) => section.id === parsed.defaultSectionId) ? parsed.defaultSectionId! : split.model.sections[0]?.id ?? "timber100");
+      setSelectedNode(split.model.nodes[0]?.id ?? null);
       setSelectedElement(null);
       setPendingNode(null);
       setResult(null);
-      setError(null);
+      setModalResult(null);
+      setError(split.splitCount > 0
+        ? (en
+            ? `Loaded project and automatically split ${split.splitCount} member(s) passing through existing nodes. Removed ${split.droppedLoadCount} beam load(s).`
+            : `项目已读取，并自动拆分 ${split.splitCount} 根穿过节点的杆件，移除 ${split.droppedLoadCount} 个原梁荷载。`)
+        : null);
     } catch (projectError) {
       setError(projectError instanceof Error ? projectError.message : (en ? "Failed to load project." : "读取项目失败。"));
     }
@@ -3259,6 +3550,10 @@ function App() {
             </div>
           )}
           <button onClick={autoClassifyElements} disabled={model.elements.length === 0}><RefreshCcw size={17} />{text.autoClassify}</button>
+          <div className="mergeControls">
+            <NumberField label={`${text.mergeTolerance} ${unitLabels[unit]}`} value={mergeTolerance} onChange={(value) => setMergeTolerance(Math.max(0, value))} />
+            <button onClick={mergeCloseNodes} disabled={model.nodes.length < 2}><Link2 size={17} />{text.mergeCloseNodes}</button>
+          </div>
           {tool === "delete" && <p className="selectionText">{text.deleteMode}</p>}
         </section>
 
