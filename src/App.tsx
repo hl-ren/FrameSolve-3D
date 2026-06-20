@@ -7,6 +7,7 @@ import { type BoundaryCondition, type DofKey, dofKeys, type ElementForce, type E
 
 type Tool = "select" | "member" | "support" | "load" | "delete" | "pan";
 type UnitKey = "m" | "cm" | "mm";
+type ModelType = "3d" | "2d";
 type LanguageKey = "zh" | "en";
 type ExampleKey = "cube" | "bridge" | "tower" | "cantilever" | "orientalPearl" | "tongjiCivil" | "scriptSpaceGrid" | "scriptBridge" | "scriptTower";
 
@@ -71,10 +72,11 @@ type ExampleDefinition = {
 };
 
 type ProjectFile = {
-  app: "FrameSolve 3D" | "BeamBar3D";
+  app: "FrameGuide 2D/3D" | "结构力学" | "Frame3D" | "FrameSolve 3D" | "BeamBar3D";
   version: "1.0";
   savedAt: string;
   unit: UnitKey;
+  modelType?: ModelType;
   gridStep: number;
   gridVisible: boolean;
   loadZ: number;
@@ -88,8 +90,15 @@ type ProjectFile = {
 
 type SolveKind = "static" | "modal";
 type MemberDisplayMode = "type" | "area" | "size" | "relativeArea" | "square";
+type DiagramComponent = {
+  start: number;
+  end: number;
+  axis: Vec3;
+};
 
-const appName = "FrameSolve 3D";
+const appName = "FrameGuide 2D/3D";
+const elementStartColor = "#0ea5e9";
+const elementEndColor = "#e11d48";
 
 const solveScaleLimits: Record<SolveKind, { activeNodes: number; elements: number; weightedDofs: number }> = {
   static: { activeNodes: 850, elements: 6500, weightedDofs: 2800 },
@@ -138,7 +147,7 @@ function snapUp(value: number, step: number): number {
   return Number((Math.ceil(value / step) * step).toFixed(6));
 }
 
-function getGridBounds(nodes: StructureNode[], step: number): GridBounds {
+function getGridBounds(nodes: StructureNode[], step: number, modelType: ModelType = "3d"): GridBounds {
   if (nodes.length === 0) return defaultGridBounds;
   const margin = step * 2;
   const xs = nodes.map((node) => node.x);
@@ -150,6 +159,21 @@ function getGridBounds(nodes: StructureNode[], step: number): GridBounds {
   const yMax = Math.max(...ys);
   const zMin = Math.min(...zs);
   const zMax = Math.max(...zs);
+  if (modelType === "2d") {
+    const xCenter = (xMin + xMax) / 2;
+    const zCenter = (zMin + zMax) / 2;
+    const defaultSpan = defaultGridBounds.xMax - defaultGridBounds.xMin;
+    const xSpan = Math.max(defaultSpan, (xMax - xMin || step) * 3, step * 6);
+    const zSpan = Math.max(defaultSpan, (zMax - zMin || step) * 3, step * 6);
+    return {
+      xMin: snapDown(xCenter - xSpan / 2, step),
+      xMax: snapUp(xCenter + xSpan / 2, step),
+      yMin: 0,
+      yMax: 0,
+      zMin: snapDown(zCenter - zSpan / 2, step),
+      zMax: snapUp(zCenter + zSpan / 2, step),
+    };
+  }
   return {
     xMin: snapDown(xMin < defaultGridBounds.xMin ? xMin - margin : defaultGridBounds.xMin, step),
     xMax: snapUp(xMax > defaultGridBounds.xMax ? xMax + margin : defaultGridBounds.xMax, step),
@@ -271,11 +295,25 @@ function elementHasExplicitRelease(element: { releaseStart?: Partial<Record<DofK
   return [...Object.values(element.releaseStart ?? {}), ...Object.values(element.releaseEnd ?? {})].some(Boolean);
 }
 
+function hasExplicitBendingConnection(release: Partial<Record<DofKey, boolean>> | undefined): boolean {
+  return release?.ry !== undefined || release?.rz !== undefined;
+}
+
+function elementEndConnection(
+  element: { releaseStart?: Partial<Record<DofKey, boolean>>; releaseEnd?: Partial<Record<DofKey, boolean>> },
+  side: "start" | "end",
+  node?: StructureNode,
+): "hinged" | "rigid" {
+  const release = side === "start" ? element.releaseStart : element.releaseEnd;
+  if (hasExplicitBendingConnection(release)) return release?.ry || release?.rz ? "hinged" : "rigid";
+  return node?.joint === "hinged" ? "hinged" : "rigid";
+}
+
 function elementVisualKind(element: { type: ElementType; startNodeId: string; endNodeId: string; releaseStart?: Partial<Record<DofKey, boolean>>; releaseEnd?: Partial<Record<DofKey, boolean>> }, nodeMap: Map<string, StructureNode>): ElementVisualKind {
   if (element.type === "bar3d") return "bar";
   const start = nodeMap.get(element.startNodeId);
   const end = nodeMap.get(element.endNodeId);
-  return start?.joint === "hinged" || end?.joint === "hinged" || elementHasExplicitRelease(element) ? "mixed" : "beam";
+  return elementEndConnection(element, "start", start) === "hinged" || elementEndConnection(element, "end", end) === "hinged" || elementHasExplicitRelease(element) ? "mixed" : "beam";
 }
 
 function elementTypeColor(kind: ElementVisualKind): string {
@@ -961,6 +999,48 @@ function toThree(node: StructureNode, modelScale: number, displacement?: Record<
   );
 }
 
+function vectorToThree(vector: Vec3): THREE.Vector3 {
+  return new THREE.Vector3(vector.x, vector.z, vector.y);
+}
+
+function createInternalForceDiagram(basePoints: THREE.Vector3[], diagramPoints: THREE.Vector3[], color: string): THREE.Group {
+  const group = new THREE.Group();
+  if (basePoints.length < 2 || diagramPoints.length !== basePoints.length) return group;
+  const fillPositions: number[] = [];
+  for (let i = 0; i < basePoints.length - 1; i += 1) {
+    const a = basePoints[i];
+    const b = basePoints[i + 1];
+    const c = diagramPoints[i + 1];
+    const d = diagramPoints[i];
+    fillPositions.push(
+      a.x, a.y, a.z,
+      b.x, b.y, b.z,
+      c.x, c.y, c.z,
+      a.x, a.y, a.z,
+      c.x, c.y, c.z,
+      d.x, d.y, d.z,
+    );
+  }
+  const fill = new THREE.BufferGeometry();
+  fill.setAttribute("position", new THREE.Float32BufferAttribute(fillPositions, 3));
+  group.add(new THREE.Mesh(fill, new THREE.MeshBasicMaterial({
+    color,
+    transparent: true,
+    opacity: 0.18,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  })));
+
+  const outline = new THREE.BufferGeometry().setFromPoints(diagramPoints);
+  group.add(new THREE.Line(outline, new THREE.LineBasicMaterial({
+    color,
+    transparent: true,
+    opacity: 0.95,
+  })));
+  group.renderOrder = 5;
+  return group;
+}
+
 function createMemberMesh(start: THREE.Vector3, end: THREE.Vector3, radius: number, color: string): THREE.Mesh {
   const direction = end.clone().sub(start);
   const length = direction.length();
@@ -1197,6 +1277,86 @@ function localToGlobalVector(axes: { ex: Vec3; ey: Vec3; ez: Vec3 }, vector: Vec
     y: axes.ex.y * vector.x + axes.ey.y * vector.y + axes.ez.y * vector.z,
     z: axes.ex.z * vector.x + axes.ey.z * vector.y + axes.ez.z * vector.z,
   };
+}
+
+function dominantShearComponent(force: ElementForce, axes: { ey: Vec3; ez: Vec3 }): DiagramComponent | null {
+  if (force.type !== "beam3d") return null;
+  const vy = { start: -(force.localEndForces[1] ?? 0), end: force.localEndForces[7] ?? 0, axis: axes.ey };
+  const vz = { start: -(force.localEndForces[2] ?? 0), end: force.localEndForces[8] ?? 0, axis: axes.ez };
+  const vyMax = Math.max(Math.abs(vy.start), Math.abs(vy.end));
+  const vzMax = Math.max(Math.abs(vz.start), Math.abs(vz.end));
+  const component = vzMax > vyMax ? vz : vy;
+  return Math.max(Math.abs(component.start), Math.abs(component.end)) > 1e-9 ? component : null;
+}
+
+function dominantMomentComponent(force: ElementForce, axes: { ey: Vec3; ez: Vec3 }, shear?: DiagramComponent | null): DiagramComponent | null {
+  if (force.type !== "beam3d") return null;
+  const mz = { start: -(force.localEndForces[5] ?? 0), end: force.localEndForces[11] ?? 0, axis: axes.ey };
+  const my = { start: -(force.localEndForces[4] ?? 0), end: force.localEndForces[10] ?? 0, axis: axes.ez };
+  const mzMax = Math.max(Math.abs(mz.start), Math.abs(mz.end));
+  const myMax = Math.max(Math.abs(my.start), Math.abs(my.end));
+  const component = myMax > mzMax ? my : mz;
+  if (Math.max(Math.abs(component.start), Math.abs(component.end)) <= 1e-9 && shear) {
+    return { start: 0, end: 0, axis: shear.axis };
+  }
+  return Math.max(Math.abs(component.start), Math.abs(component.end)) > 1e-9 ? component : null;
+}
+
+function axialDiagramComponent(force: ElementForce, ex: Vec3, axes: { ey: Vec3 }, modelType: ModelType): DiagramComponent | null {
+  if (Math.abs(force.axial) <= 1e-9) return null;
+  const axis = modelType === "2d"
+    ? vecNormalize({ x: -ex.z, y: 0, z: ex.x })
+    : axes.ey;
+  return { start: force.axial, end: force.axial, axis };
+}
+
+function diagramSamples(
+  startPoint: THREE.Vector3,
+  endPoint: THREE.Vector3,
+  axis: Vec3,
+  values: number[],
+  maxValue: number,
+  sceneSize: number,
+  scale: number,
+): { base: THREE.Vector3[]; diagram: THREE.Vector3[] } {
+  const offsetDirection = vectorToThree(axis).normalize();
+  const amplitude = (sceneSize * 0.075 * Math.max(0, scale)) / Math.max(1e-12, maxValue);
+  const base: THREE.Vector3[] = [];
+  const diagram: THREE.Vector3[] = [];
+  for (let i = 0; i < values.length; i += 1) {
+    const ratio = values.length <= 1 ? 0 : i / (values.length - 1);
+    const point = startPoint.clone().lerp(endPoint, ratio);
+    base.push(point);
+    diagram.push(point.clone().add(offsetDirection.clone().multiplyScalar(values[i] * amplitude)));
+  }
+  return { base, diagram };
+}
+
+function interpolateShearValues(component: DiagramComponent, count: number): number[] {
+  return Array.from({ length: count }, (_, index) => {
+    const ratio = count <= 1 ? 0 : index / (count - 1);
+    return component.start + (component.end - component.start) * ratio;
+  });
+}
+
+function interpolateAxialValues(component: DiagramComponent, count: number): number[] {
+  return Array.from({ length: count }, () => component.start);
+}
+
+function interpolateMomentValues(moment: DiagramComponent, shear: DiagramComponent | null, lengthValue: number, count: number): number[] {
+  if (!shear || lengthValue < 1e-12) {
+    return Array.from({ length: count }, (_, index) => {
+      const ratio = count <= 1 ? 0 : index / (count - 1);
+      return moment.start + (moment.end - moment.start) * ratio;
+    });
+  }
+  const rawEnd = moment.start + lengthValue * (shear.start + 0.5 * (shear.end - shear.start));
+  const correction = moment.end - rawEnd;
+  return Array.from({ length: count }, (_, index) => {
+    const ratio = count <= 1 ? 0 : index / (count - 1);
+    const integrated = moment.start + lengthValue * (shear.start * ratio + 0.5 * (shear.end - shear.start) * ratio ** 2);
+    return integrated + correction * ratio;
+  });
 }
 
 function interpolateNode(start: StructureNode, end: StructureNode, ratio: number): StructureNode {
@@ -1522,6 +1682,10 @@ function isUnitKey(value: unknown): value is UnitKey {
   return value === "m" || value === "cm" || value === "mm";
 }
 
+function isModelType(value: unknown): value is ModelType {
+  return value === "3d" || value === "2d";
+}
+
 function isStructureModel(value: unknown): value is StructureModel {
   if (!value || typeof value !== "object") return false;
   const model = value as Partial<StructureModel>;
@@ -1574,6 +1738,131 @@ function boundaryHasActiveDof(boundary: BoundaryCondition): boolean {
   return dofKeys.some((key) => Boolean(boundary[key]));
 }
 
+function projectModelToXzPlane(model: StructureModel): StructureModel {
+  const projected = {
+    ...model,
+    nodes: model.nodes.map((node) => ({ ...node, y: 0 })),
+    loads: model.loads.map((load) => ({ ...load, fy: 0, mx: 0, mz: 0 })),
+    elementLoads: (model.elementLoads ?? []).map((load) => load.type === "point"
+      ? { ...load, fy: 0 }
+      : { ...load, wy: 0 }),
+    nodalMasses: model.nodalMasses ?? [],
+  };
+  const merged = mergeCloseNodesInModel(projected, 1e-7).model;
+  const keptElementByKey = new Map<string, string>();
+  const elementIdMap = new Map<string, string>();
+  const elements = merged.elements.filter((element) => {
+    const key = [element.startNodeId, element.endNodeId].sort().join("::");
+    const keptElementId = keptElementByKey.get(key);
+    if (keptElementId) {
+      elementIdMap.set(element.id, keptElementId);
+      return false;
+    }
+    keptElementByKey.set(key, element.id);
+    elementIdMap.set(element.id, element.id);
+    return true;
+  });
+  const elementIds = new Set(elements.map((element) => element.id));
+  return {
+    ...merged,
+    elements,
+    elementLoads: (merged.elementLoads ?? [])
+      .map((load) => ({ ...load, elementId: elementIdMap.get(load.elementId) ?? load.elementId }))
+      .filter((load) => elementIds.has(load.elementId)),
+  };
+}
+
+function withElementLoadBeams(model: StructureModel): StructureModel {
+  const loadedElementIds = new Set((model.elementLoads ?? []).map((load) => load.elementId));
+  if (loadedElementIds.size === 0) return model;
+  return {
+    ...model,
+    elements: model.elements.map((element) => loadedElementIds.has(element.id) ? { ...element, type: "beam3d" } : element),
+  };
+}
+
+function withXzPlaneConstraints(model: StructureModel): StructureModel {
+  const boundaryMap = new Map<string, BoundaryCondition>();
+  for (const boundary of model.boundaries) boundaryMap.set(boundary.nodeId, { ...boundary, values: boundary.values ? { ...boundary.values } : undefined });
+  for (const node of model.nodes) {
+    const boundary = boundaryMap.get(node.id) ?? { nodeId: node.id };
+    boundaryMap.set(node.id, { ...boundary, uy: true, rx: true, rz: true });
+  }
+  return { ...model, boundaries: Array.from(boundaryMap.values()) };
+}
+
+function rotationKeyClosestToAxis(axis: Vec3): DofKey {
+  const ax = Math.abs(axis.x);
+  const ay = Math.abs(axis.y);
+  const az = Math.abs(axis.z);
+  if (ay >= ax && ay >= az) return "ry";
+  if (az >= ax && az >= ay) return "rz";
+  return "rx";
+}
+
+function withBeamTorsionReferenceConstraints(model: StructureModel): StructureModel {
+  const beamElements = model.elements.filter((element) => element.type === "beam3d");
+  if (beamElements.length === 0) return model;
+  const nodeMap = new Map(model.nodes.map((node) => [node.id, node]));
+  const boundaryMap = new Map<string, BoundaryCondition>();
+  for (const boundary of model.boundaries) boundaryMap.set(boundary.nodeId, { ...boundary, values: boundary.values ? { ...boundary.values } : undefined });
+  const visited = new Set<string>();
+  const additions: Array<{ nodeId: string; key: DofKey }> = [];
+
+  for (const seed of beamElements) {
+    if (visited.has(seed.id)) continue;
+    const component: StructureModel["elements"] = [];
+    const nodeIds = new Set<string>();
+    const queue = [seed];
+    visited.add(seed.id);
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      component.push(current);
+      nodeIds.add(current.startNodeId);
+      nodeIds.add(current.endNodeId);
+      for (const candidate of beamElements) {
+        if (visited.has(candidate.id)) continue;
+        if (nodeIds.has(candidate.startNodeId) || nodeIds.has(candidate.endNodeId)) {
+          visited.add(candidate.id);
+          queue.push(candidate);
+        }
+      }
+    }
+
+    const directions = component
+      .map((element) => {
+        const start = nodeMap.get(element.startNodeId);
+        const end = nodeMap.get(element.endNodeId);
+        return start && end ? vecNormalize(vecSub(end, start)) : null;
+      })
+      .filter((item): item is Vec3 => item !== null);
+    const reference = directions[0];
+    if (!reference) continue;
+    const isCollinear = directions.every((direction) => vecLength(vecCross(reference, direction)) < 1e-6);
+    if (!isCollinear) continue;
+    const torsionKey = rotationKeyClosestToAxis(reference);
+    if ([...nodeIds].some((nodeId) => Boolean(boundaryMap.get(nodeId)?.[torsionKey]))) continue;
+    const supportNodeId = [...nodeIds].find((nodeId) => {
+      const boundary = boundaryMap.get(nodeId);
+      return Boolean(boundary?.ux || boundary?.uy || boundary?.uz);
+    }) ?? component[0].startNodeId;
+    additions.push({ nodeId: supportNodeId, key: torsionKey });
+  }
+
+  if (additions.length === 0) return model;
+  for (const { nodeId, key } of additions) {
+    const boundary = boundaryMap.get(nodeId) ?? { nodeId };
+    boundaryMap.set(nodeId, { ...boundary, [key]: true });
+  }
+  return { ...model, boundaries: Array.from(boundaryMap.values()) };
+}
+
+function prepareModelForAnalysis(model: StructureModel, modelType: ModelType): StructureModel {
+  const projected = modelType === "2d" ? projectModelToXzPlane(model) : model;
+  const loadedAsBeams = withElementLoadBeams(projected);
+  return modelType === "2d" ? withXzPlaneConstraints(loadedAsBeams) : withBeamTorsionReferenceConstraints(loadedAsBeams);
+}
+
 function isLoadCoordinate(value: unknown): value is LoadCoordinate {
   return value === "global" || value === "local";
 }
@@ -1582,6 +1871,19 @@ function isCompleteNumberInput(value: string): boolean {
   const text = value.trim();
   if (text === "" || text === "-" || text === "+" || text === "." || text === "-." || text === "+.") return false;
   return Number.isFinite(Number(text));
+}
+
+function formatNumberInputValue(value: number): string {
+  if (!Number.isFinite(value)) return "0";
+  if (Object.is(value, -0) || value === 0) return "0";
+  const plain = String(value);
+  const abs = Math.abs(value);
+  if (!plain.includes("e") && plain.length <= 12 && abs >= 1e-4 && abs < 1e7) return plain;
+  return value
+    .toExponential(6)
+    .replace(/(\.\d*?[1-9])0+e/, "$1e")
+    .replace(/\.0+e/, "e")
+    .replace("e+", "e");
 }
 
 function convertModelToMeters(model: StructureModel, scale: number): StructureModel {
@@ -1815,6 +2117,7 @@ function App() {
   const [gridVisible, setGridVisible] = useState(true);
   const [memberSnapVisible, setMemberSnapVisible] = useState(false);
   const [unit, setUnit] = useState<UnitKey>("cm");
+  const [modelType, setModelType] = useState<ModelType>("3d");
   const [defaultMaterialId, setDefaultMaterialId] = useState("wood");
   const [defaultSectionId, setDefaultSectionId] = useState("timber100");
   const [sectionNameDraft, setSectionNameDraft] = useState("New section");
@@ -1845,6 +2148,14 @@ function App() {
   const [memberDisplayMode, setMemberDisplayMode] = useState<MemberDisplayMode>("square");
   const [memberDisplayColor, setMemberDisplayColor] = useState("#2563eb");
   const [memberDisplayScale, setMemberDisplayScale] = useState(1);
+  const [axialForceLineVisible, setAxialForceLineVisible] = useState(true);
+  const [axialDiagramVisible, setAxialDiagramVisible] = useState(false);
+  const [shearDiagramVisible, setShearDiagramVisible] = useState(false);
+  const [momentDiagramVisible, setMomentDiagramVisible] = useState(false);
+  const [axialForceLineScale, setAxialForceLineScale] = useState(1);
+  const [axialDiagramScale, setAxialDiagramScale] = useState(1);
+  const [shearDiagramScale, setShearDiagramScale] = useState(1);
+  const [momentDiagramScale, setMomentDiagramScale] = useState(1);
   const [mergeTolerance, setMergeTolerance] = useState(0.01);
   const [constraintWarnings, setConstraintWarnings] = useState<ConstraintWarning>({ nodeIds: [], elementIds: [] });
   const [memberColorDialogOpen, setMemberColorDialogOpen] = useState(false);
@@ -1861,6 +2172,7 @@ function App() {
   const defaultMaterialRef = useRef(defaultMaterialId);
   const defaultSectionRef = useRef(defaultSectionId);
   const unitRef = useRef(unit);
+  const modelTypeRef = useRef(modelType);
   const resultRef = useRef(result);
   const modalResultRef = useRef(modalResult);
   const activeModeRef = useRef(activeMode);
@@ -1869,6 +2181,14 @@ function App() {
   const memberDisplayModeRef = useRef(memberDisplayMode);
   const memberDisplayColorRef = useRef(memberDisplayColor);
   const memberDisplayScaleRef = useRef(memberDisplayScale);
+  const axialForceLineVisibleRef = useRef(axialForceLineVisible);
+  const axialDiagramVisibleRef = useRef(axialDiagramVisible);
+  const shearDiagramVisibleRef = useRef(shearDiagramVisible);
+  const momentDiagramVisibleRef = useRef(momentDiagramVisible);
+  const axialForceLineScaleRef = useRef(axialForceLineScale);
+  const axialDiagramScaleRef = useRef(axialDiagramScale);
+  const shearDiagramScaleRef = useRef(shearDiagramScale);
+  const momentDiagramScaleRef = useRef(momentDiagramScale);
   const constraintWarningsRef = useRef(constraintWarnings);
   const languageRef = useRef(language);
   const staticDeformScaleRef = useRef(staticDeformScale);
@@ -1887,6 +2207,7 @@ function App() {
   useEffect(() => { defaultMaterialRef.current = defaultMaterialId; }, [defaultMaterialId]);
   useEffect(() => { defaultSectionRef.current = defaultSectionId; }, [defaultSectionId]);
   useEffect(() => { unitRef.current = unit; }, [unit]);
+  useEffect(() => { modelTypeRef.current = modelType; }, [modelType]);
   useEffect(() => { resultRef.current = result; }, [result]);
   useEffect(() => { modalResultRef.current = modalResult; }, [modalResult]);
   useEffect(() => { activeModeRef.current = activeMode; }, [activeMode]);
@@ -1895,11 +2216,19 @@ function App() {
   useEffect(() => { memberDisplayModeRef.current = memberDisplayMode; }, [memberDisplayMode]);
   useEffect(() => { memberDisplayColorRef.current = memberDisplayColor; }, [memberDisplayColor]);
   useEffect(() => { memberDisplayScaleRef.current = memberDisplayScale; }, [memberDisplayScale]);
+  useEffect(() => { axialForceLineVisibleRef.current = axialForceLineVisible; }, [axialForceLineVisible]);
+  useEffect(() => { axialDiagramVisibleRef.current = axialDiagramVisible; }, [axialDiagramVisible]);
+  useEffect(() => { shearDiagramVisibleRef.current = shearDiagramVisible; }, [shearDiagramVisible]);
+  useEffect(() => { momentDiagramVisibleRef.current = momentDiagramVisible; }, [momentDiagramVisible]);
+  useEffect(() => { axialForceLineScaleRef.current = axialForceLineScale; }, [axialForceLineScale]);
+  useEffect(() => { axialDiagramScaleRef.current = axialDiagramScale; }, [axialDiagramScale]);
+  useEffect(() => { shearDiagramScaleRef.current = shearDiagramScale; }, [shearDiagramScale]);
+  useEffect(() => { momentDiagramScaleRef.current = momentDiagramScale; }, [momentDiagramScale]);
   useEffect(() => { constraintWarningsRef.current = constraintWarnings; }, [constraintWarnings]);
   useEffect(() => { languageRef.current = language; }, [language]);
   useEffect(() => { staticDeformScaleRef.current = staticDeformScale; }, [staticDeformScale]);
   useEffect(() => { modalDeformScaleRef.current = modalDeformScale; }, [modalDeformScale]);
-  useEffect(() => { sceneDirtyRef.current = true; }, [model, result, modalResult, activeMode, modalAnimate, modalColor, staticDeformScale, modalDeformScale, selectedNode, selectedElement, memberSnapVisible, memberDisplayMode, memberDisplayColor, memberDisplayScale, constraintWarnings]);
+  useEffect(() => { sceneDirtyRef.current = true; }, [model, modelType, result, modalResult, activeMode, modalAnimate, modalColor, staticDeformScale, modalDeformScale, selectedNode, selectedElement, memberSnapVisible, memberDisplayMode, memberDisplayColor, memberDisplayScale, axialForceLineVisible, axialDiagramVisible, shearDiagramVisible, momentDiagramVisible, axialForceLineScale, axialDiagramScale, shearDiagramScale, momentDiagramScale, constraintWarnings]);
   useEffect(() => {
     setModalResult(null);
     setActiveMode(1);
@@ -1916,12 +2245,21 @@ function App() {
     if (!selectedElementData) return null;
     return elementVisualKind(selectedElementData, new Map(model.nodes.map((node) => [node.id, node])));
   }, [model.nodes, selectedElementData]);
+  const selectedElementStartConnection = useMemo(() => {
+    if (!selectedElementData) return "rigid";
+    return elementEndConnection(selectedElementData, "start", model.nodes.find((node) => node.id === selectedElementData.startNodeId));
+  }, [model.nodes, selectedElementData]);
+  const selectedElementEndConnection = useMemo(() => {
+    if (!selectedElementData) return "rigid";
+    return elementEndConnection(selectedElementData, "end", model.nodes.find((node) => node.id === selectedElementData.endNodeId));
+  }, [model.nodes, selectedElementData]);
   const activeMaterialId = selectedElementData?.materialId ?? defaultMaterialId;
   const activeSectionId = selectedElementData?.sectionId ?? defaultSectionId;
   const activeMaterial = useMemo(() => model.materials.find((material) => material.id === activeMaterialId) ?? model.materials[0] ?? defaultMaterials[0], [model.materials, activeMaterialId]);
   const activeSection = useMemo(() => model.sections.find((section) => section.id === activeSectionId) ?? model.sections[0] ?? defaultSections[0], [model.sections, activeSectionId]);
   const currentUnitScale = unitScale[unit];
-  const gridBounds = useMemo(() => getGridBounds(model.nodes, gridStep), [model.nodes, gridStep]);
+  const gridBounds = useMemo(() => getGridBounds(model.nodes, gridStep, modelType), [model.nodes, gridStep, modelType]);
+  const visibleDofKeys = useMemo(() => modelType === "2d" ? (["ux", "uz", "ry"] as DofKey[]) : dofKeys, [modelType]);
   const en = language === "en";
 
   useEffect(() => {
@@ -1940,7 +2278,7 @@ function App() {
   }, [activeSection.id, activeSection.width, activeSection.height, activeSection.A, activeSection.Iy, activeSection.Iz, activeSection.J]);
 
   const text = {
-    subtitle: en ? "3D frame/truss modeling and solving" : "3D 杆系优先 / 梁单元求解",
+    subtitle: en ? "2D/3D frame and beam" : "2D/3D杆系/梁单元",
     saveProject: en ? "Save project" : "保存项目",
     loadProject: en ? "Load project" : "读取项目",
     undo: en ? "Undo Ctrl+Z" : "撤销 Ctrl+Z",
@@ -1960,7 +2298,7 @@ function App() {
     pickGrid: en ? "Pick spatial grid" : "拾取空间 grid",
     examples: en ? "Examples" : "典型模型",
     example: en ? "Example" : "算例",
-    loadExample: en ? "Load example" : "加载模型",
+    loadExample: en ? "Load" : "加载",
     noSelection: en ? "No selection" : "未选择",
     node: en ? "Node" : "节点",
     bar: en ? "Bar" : "杆",
@@ -1986,6 +2324,9 @@ function App() {
     beamLoadHint: en ? "Adding a beam load makes this member participate as a beam element." : "添加梁荷载后，该单元会按梁单元参与求解。",
     deleteBeamLoad: en ? "Delete beam load" : "删除梁荷载",
     unitSystem: en ? "Units" : "单位系统",
+    modelType: en ? "Model" : "模型",
+    model2d: "2D",
+    model3d: "3D",
     materialSection: en ? "Materials & sections" : "材料与截面",
     material: en ? "Material" : "材料",
     sectionTag: en ? "Section tag" : "截面标签",
@@ -2001,8 +2342,8 @@ function App() {
     exportScript: en ? "Export script" : "导出脚本",
     scriptHint: en ? "Abaqus-like block format: *Node, *Section and *Element each on its own line. Element rows are eid, n1, n2, secId when secId exists." : "Abaqus 类似分段格式：*Node、*Section、*Element 各自单独一行；单元行为 eid, n1, n2, secId（若 secId 存在）。",
     spatialGrid: en ? "Spatial Grid" : "空间 Grid",
-    hideGrid: en ? "Hide spatial Grid" : "隐藏空间 Grid",
-    showGrid: en ? "Show spatial Grid" : "显示空间 Grid",
+    hideGrid: en ? "Hide Grid" : "隐藏Grid",
+    showGrid: en ? "Show Grid" : "显示Grid",
     spacing: en ? "Spacing" : "间距",
     memberSnap: en ? "Member snap" : "梁杆拾取点",
     showMemberSnap: en ? "Show snap points" : "显示拾取点",
@@ -2015,8 +2356,10 @@ function App() {
     nodeConditions: en ? "Node conditions" : "节点条件",
     hinged: en ? "Hinged" : "铰接",
     rigid: en ? "Rigid" : "刚接",
-    confirmLoad: en ? "Confirm load" : "确认荷载",
-    confirmMass: en ? "Confirm mass" : "确认质点",
+    startEnd: en ? "Start end" : "起端",
+    endEnd: en ? "End end" : "终端",
+    endConnection: en ? "End connections" : "单元端部连接",
+    massHint: en ? "Affects frequency only" : "质点只对频率计算有影响",
     deleteMass: en ? "Delete mass" : "删除质点",
     display: en ? "Display" : "求解显示",
     displayType: en ? "Type" : "按类型",
@@ -2030,6 +2373,15 @@ function App() {
     sectionScale: en ? "Section scale" : "截面scale",
     staticScale: en ? "Static scale" : "静力scale",
     modalScale: en ? "Modal scale" : "模态scale",
+    diagramScaleTitle: en ? "Scale" : "缩放",
+    axialForceLineScale: en ? "Line" : "粗线",
+    axialDiagramScale: "N",
+    shearDiagramScale: "V",
+    momentDiagramScale: "M",
+    axialForceLine: en ? "Axial line" : "拉压粗线",
+    axialDiagram: en ? "Axial N" : "轴力图",
+    shearDiagram: en ? "Shear V" : "剪力图",
+    momentDiagram: en ? "Moment M" : "弯矩图",
     modalCount: en ? "Mode count" : "模态阶数",
     solve: en ? "Solve" : "求解",
     frequency: en ? "Frequency" : "频率",
@@ -2048,7 +2400,7 @@ function App() {
     animate: en ? "Animate" : "动态显示",
     lineColor: en ? "Line color" : "线形颜色",
     mode: en ? "Mode" : "阶",
-    helpGuide: en ? "FrameSolve 3D Product Guide" : "FrameSolve 3D 产品 Guide",
+    helpGuide: en ? "FrameGuide 2D/3D Product Guide" : "FrameGuide 2D/3D 产品 Guide",
     productGuide: en ? "Product Guide" : "产品 Guide",
     authorInfo: en ? "Author" : "作者信息",
     affiliation: en ? "Affiliation" : "单位",
@@ -2063,12 +2415,16 @@ function App() {
   };
 
   useEffect(() => {
+    document.title = "FrameGuide 2D/3D";
+  }, [en]);
+
+  useEffect(() => {
     setLoadDraft({
       fx: selectedLoad?.fx ?? 0,
       fy: selectedLoad?.fy ?? 0,
-      fz: selectedLoad?.fz ?? loadZ,
+      fz: selectedLoad?.fz ?? 0,
     });
-  }, [selectedLoad, selectedNode, loadZ]);
+  }, [selectedLoad, selectedNode]);
 
   useEffect(() => {
     setMassDraft(selectedMass?.mass ?? 0);
@@ -2184,7 +2540,8 @@ function App() {
       setModel(prepared.model);
       setSelectedElement(null);
     }
-    const scaleError = solveScaleError(prepared.model, "static", language);
+    const analysisModel = prepareModelForAnalysis(prepared.model, modelType);
+    const scaleError = solveScaleError(analysisModel, "static", language);
     if (scaleError) {
       setResult(null);
       setModalResult(null);
@@ -2193,7 +2550,7 @@ function App() {
       return;
     }
     try {
-      const solved = solveStructure(convertModelToMeters(prepared.model, currentUnitScale));
+      const solved = solveStructure(convertModelToMeters(analysisModel, currentUnitScale));
       setResult(solved);
       setResultPopupOpen(false);
       setModalResult(null);
@@ -2207,7 +2564,7 @@ function App() {
         : null);
     } catch (solveError) {
       const warning = diagnoseUnderconstrainedMembers(prepared.model);
-      const rigidSuggestion = findRigidJointStabilizers(convertModelToMeters(prepared.model, currentUnitScale));
+      const rigidSuggestion = findRigidJointStabilizers(convertModelToMeters(analysisModel, currentUnitScale));
       const mergedWarning: ConstraintWarning = {
         nodeIds: Array.from(new Set([...warning.nodeIds, ...rigidSuggestion])),
         elementIds: Array.from(new Set([...warning.elementIds, ...connectedElementIds(prepared.model, rigidSuggestion)])),
@@ -2229,7 +2586,8 @@ function App() {
       setModel(prepared.model);
       setSelectedElement(null);
     }
-    const scaleError = solveScaleError(prepared.model, "modal", language);
+    const analysisModel = prepareModelForAnalysis(prepared.model, modelType);
+    const scaleError = solveScaleError(analysisModel, "modal", language);
     if (scaleError) {
       setResult(null);
       setModalResult(null);
@@ -2239,7 +2597,7 @@ function App() {
     }
     try {
       const modeCount = Math.max(1, Math.min(24, Math.round(modalModeCount)));
-      const solved = solveModalAnalysis(convertModelToMeters(prepared.model, currentUnitScale), modeCount);
+      const solved = solveModalAnalysis(convertModelToMeters(analysisModel, currentUnitScale), modeCount);
       setModalResult(solved);
       setResultPopupOpen(true);
       setActiveMode(solved.modes[0]?.mode ?? 1);
@@ -2252,7 +2610,7 @@ function App() {
         : null);
     } catch (solveError) {
       const warning = diagnoseUnderconstrainedMembers(prepared.model);
-      const rigidSuggestion = findRigidJointStabilizers(convertModelToMeters(prepared.model, currentUnitScale));
+      const rigidSuggestion = findRigidJointStabilizers(convertModelToMeters(analysisModel, currentUnitScale));
       const mergedWarning: ConstraintWarning = {
         nodeIds: Array.from(new Set([...warning.nodeIds, ...rigidSuggestion])),
         elementIds: Array.from(new Set([...warning.elementIds, ...connectedElementIds(prepared.model, rigidSuggestion)])),
@@ -2278,6 +2636,7 @@ function App() {
     setPendingNode(null);
     setTool("member");
     setUnit(example.unit);
+    setModelType("3d");
     setDefaultMaterialId("wood");
     setDefaultSectionId("timber100");
     setGridStep(nextGridStep);
@@ -2332,6 +2691,25 @@ function App() {
     setError(null);
   };
 
+  const changeModelType = (nextType: ModelType) => {
+    if (nextType === modelType) return;
+    saveHistory();
+    if (nextType === "2d") {
+      setModel((current) => projectModelToXzPlane(current));
+      setOffset((value) => ({ ...value, dy: 0 }));
+      setCoordinateNode((value) => ({ ...value, y: 0 }));
+      setLoadDraft((value) => ({ ...value, fy: 0 }));
+      setElementLoadDraft((value) => ({ ...value, y: 0 }));
+      setError(en ? "2D mode uses the X-Z plane. Y is held at 0 and uy/rx/rz are constrained internally." : "2D 模型使用 X-Z 平面：Y 坐标保持 0，uy/rx/rz 在求解中自动约束且不显示。");
+    } else {
+      setError(null);
+    }
+    setModelType(nextType);
+    setPendingNode(null);
+    setResult(null);
+    setModalResult(null);
+  };
+
   useEffect(() => {
     if (!mountRef.current) return;
     const mount = mountRef.current;
@@ -2351,7 +2729,11 @@ function App() {
     );
     const symbolScale = Math.max(gridStep * currentUnitScale, 0.0001);
     const camera = new THREE.PerspectiveCamera(45, mount.clientWidth / mount.clientHeight, Math.max(sceneSize / 1000, 0.00001), Math.max(sceneSize * 200, 10));
-    camera.position.copy(sceneCenter).add(new THREE.Vector3(1.45 * sceneSize, 1.2 * sceneSize, 1.55 * sceneSize));
+    if (modelType === "2d") {
+      camera.position.copy(sceneCenter).add(new THREE.Vector3(0, 0, 2.4 * sceneSize));
+    } else {
+      camera.position.copy(sceneCenter).add(new THREE.Vector3(1.45 * sceneSize, 1.2 * sceneSize, 1.55 * sceneSize));
+    }
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(mount.clientWidth, mount.clientHeight);
@@ -2359,17 +2741,18 @@ function App() {
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.target.copy(sceneCenter);
-    if (cameraViewRef.current) {
+    if (modelType === "3d" && cameraViewRef.current) {
       camera.position.fromArray(cameraViewRef.current.position);
       controls.target.fromArray(cameraViewRef.current.target);
     }
+    controls.enableRotate = modelType === "3d";
     controls.enableDamping = true;
     let controlTool: Tool | null = null;
     const syncControlMode = () => {
       if (controlTool === toolRef.current) return;
       controlTool = toolRef.current;
       controls.mouseButtons.LEFT = controlTool === "pan" ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE;
-      controls.mouseButtons.RIGHT = controlTool === "pan" ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN;
+      controls.mouseButtons.RIGHT = modelType === "2d" ? THREE.MOUSE.PAN : controlTool === "pan" ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN;
     };
 
     scene.add(new THREE.HemisphereLight("#ffffff", "#b8c1d1", 2.4));
@@ -2379,15 +2762,16 @@ function App() {
     const xValues = gridValues(gridBounds.xMin, gridBounds.xMax, gridStep);
     const yValues = gridValues(gridBounds.yMin, gridBounds.yMax, gridStep);
     const zValues = gridValues(gridBounds.zMin, gridBounds.zMax, gridStep);
-    const gridRenderStride = Math.max(1, Math.ceil(Math.max(xValues.length, yValues.length, zValues.length) / 20));
+    const planeYValues = modelType === "2d" ? [0] : yValues;
+    const gridRenderStride = Math.max(1, Math.ceil(Math.max(xValues.length, planeYValues.length, zValues.length) / 20));
     const visibleXValues = xValues.filter((_, index) => index % gridRenderStride === 0);
-    const visibleYValues = yValues.filter((_, index) => index % gridRenderStride === 0);
+    const visibleYValues = planeYValues.filter((_, index) => index % gridRenderStride === 0);
     const visibleZValues = zValues.filter((_, index) => index % gridRenderStride === 0);
     const visibleGridStep = gridStep * gridRenderStride * currentUnitScale;
     const floorSize = Math.max(gridBounds.xMax - gridBounds.xMin, gridBounds.yMax - gridBounds.yMin) * currentUnitScale;
     const baseGrid = new THREE.GridHelper(floorSize, Math.max(2, Math.round(floorSize / visibleGridStep)), "#8ea0b4", "#d1d9e3");
     baseGrid.position.set((gridBounds.xMin + gridBounds.xMax) * currentUnitScale / 2, 0, (gridBounds.yMin + gridBounds.yMax) * currentUnitScale / 2);
-    baseGrid.visible = true;
+    baseGrid.visible = modelType === "3d";
     scene.add(baseGrid);
     const coordinateAxes = createCoordinateAxes(symbolScale);
     scene.add(coordinateAxes);
@@ -2399,13 +2783,13 @@ function App() {
     scene.add(spatialGridLines);
     const gridPoints: Vec3[] = [];
     const gridPositions: number[] = [];
-    const totalGridPoints = xValues.length * yValues.length * zValues.length;
+    const totalGridPoints = xValues.length * planeYValues.length * zValues.length;
     const pointStride = Math.max(1, Math.ceil(Math.cbrt(totalGridPoints / 50000)));
     for (let xi = 0; xi < xValues.length; xi += pointStride) {
-      for (let yi = 0; yi < yValues.length; yi += pointStride) {
+      for (let yi = 0; yi < planeYValues.length; yi += pointStride) {
         for (let zi = 0; zi < zValues.length; zi += pointStride) {
           const x = xValues[xi];
-          const y = yValues[yi];
+          const y = planeYValues[yi];
           const z = zValues[zi];
           gridPoints.push({ x, y, z });
           gridPositions.push(x * currentUnitScale, z * currentUnitScale, y * currentUnitScale);
@@ -2492,9 +2876,35 @@ function App() {
       const displacementScale = (solved?.maxDisplacement ? Math.min(200, 1.8 / solved.maxDisplacement) : 1) * Math.max(0, staticDeformScaleRef.current);
       const forceMap = new Map(solved?.elementForces.map((force) => [force.elementId, force]));
       const maxAxial = Math.max(1, ...(solved?.elementForces.map((force) => Math.abs(force.axial)) ?? [0]));
+      const beamForces = solved?.elementForces.filter((force) => force.type === "beam3d") ?? [];
+      const maxShearDiagram = Math.max(1, ...beamForces.flatMap((force) => [
+        Math.abs(force.localEndForces[1] ?? 0),
+        Math.abs(force.localEndForces[2] ?? 0),
+        Math.abs(force.localEndForces[7] ?? 0),
+        Math.abs(force.localEndForces[8] ?? 0),
+      ]));
       const sectionMap = new Map(current.sections.map((section) => [section.id, section]));
       const maxSectionArea = Math.max(1e-12, ...current.elements.map((element) => Math.max(0, sectionMap.get(element.sectionId)?.A ?? 0)));
       const duplicates = duplicateElementMeta(current.elements);
+      const maxMomentDiagram = Math.max(1, ...beamForces.map((force) => {
+        const element = current.elements.find((item) => item.id === force.elementId);
+        const a = element ? nodeMap.get(element.startNodeId) : undefined;
+        const b = element ? nodeMap.get(element.endNodeId) : undefined;
+        const lengthValue = a && b ? toThree(a, currentUnitScale).distanceTo(toThree(b, currentUnitScale)) : 0;
+        const shearEstimate = Math.max(
+          Math.abs(force.localEndForces[1] ?? 0),
+          Math.abs(force.localEndForces[2] ?? 0),
+          Math.abs(force.localEndForces[7] ?? 0),
+          Math.abs(force.localEndForces[8] ?? 0),
+        ) * lengthValue * 0.5;
+        return Math.max(
+          Math.abs(force.localEndForces[4] ?? 0),
+          Math.abs(force.localEndForces[5] ?? 0),
+          Math.abs(force.localEndForces[10] ?? 0),
+          Math.abs(force.localEndForces[11] ?? 0),
+          shearEstimate,
+        );
+      }));
       const warningElementIds = new Set(constraintWarningsRef.current.elementIds);
       const warningNodeIds = new Set(constraintWarningsRef.current.nodeIds);
       const memberSnapPositions: number[] = [];
@@ -2513,6 +2923,8 @@ function App() {
         const sectionDriven = displayMode !== "type" && !modalMode;
         const duplicate = duplicates.get(element.id);
         const isUnderconstrained = warningElementIds.has(element.id);
+        const showAxialForceLine = axialForceLineVisibleRef.current && !sectionDriven && !modalMode && force !== undefined && Math.abs(force.axial) > axialTolerance;
+        const axialLineRadius = 0.018 + 0.11 * forceRatio * Math.max(0, axialForceLineScaleRef.current);
         const color = isSelectedElement
           ? "#f2a900"
           : modalMode
@@ -2523,10 +2935,10 @@ function App() {
               ? "#ec4899"
             : sectionDriven
               ? memberDisplayColorRef.current
-              : !force || Math.abs(force.axial) <= axialTolerance ? elementTypeColor(visualKind) : force.axial > 0 ? "#1b8f4d" : "#d33f32";
+              : !showAxialForceLine ? elementTypeColor(visualKind) : force!.axial > 0 ? "#1b8f4d" : "#d33f32";
         const baseRadius = sectionDriven ? sectionRadius : typeRadius;
         const modalOriginalRadius = displayMode === "square" ? Math.max(0.012, sectionRadius * 0.65) : 0.01;
-        const radius = symbolScale * (isSelectedElement ? 1.8 : isUnderconstrained ? 1.65 : 1) * (modalMode ? modalOriginalRadius : sectionDriven || !force || Math.abs(force.axial) <= axialTolerance ? baseRadius : 0.018 + 0.11 * forceRatio);
+        const radius = symbolScale * (isSelectedElement ? 1.8 : isUnderconstrained ? 1.65 : 1) * (modalMode ? modalOriginalRadius : showAxialForceLine ? axialLineRadius : baseRadius);
         const offsetPoints = offsetDuplicateMemberPoints(toThree(a, currentUnitScale), toThree(b, currentUnitScale), duplicate, symbolScale * 0.12);
         const startPoint = offsetPoints.start;
         const endPoint = offsetPoints.end;
@@ -2544,6 +2956,21 @@ function App() {
           );
           highlightMesh.renderOrder = 3;
           content.add(highlightMesh);
+          const startConnection = elementEndConnection(element, "start", a);
+          const endConnection = elementEndConnection(element, "end", b);
+          for (const [point, connection, markerColor] of [[startPoint, startConnection, elementStartColor], [endPoint, endConnection, elementEndColor]] as const) {
+            const marker = new THREE.Mesh(
+              new THREE.SphereGeometry(symbolScale * 0.095, 24, 16),
+              new THREE.MeshStandardMaterial({
+                color: markerColor,
+                roughness: 0.36,
+                wireframe: connection === "hinged",
+              }),
+            );
+            marker.position.copy(point);
+            marker.renderOrder = 4;
+            content.add(marker);
+          }
         }
         const pickMesh = createMemberPickMesh(startPoint, endPoint, Math.max(radius * 2.4, symbolScale * 0.08, sceneSize * 0.004));
         pickMesh.userData.elementId = element.id;
@@ -2568,6 +2995,34 @@ function App() {
             deformedOffset.end,
           ]);
           content.add(new THREE.Line(deformed, new THREE.LineBasicMaterial({ color: "#e4572e" })));
+        }
+
+        if (solved && force && !modalMode && (axialDiagramVisibleRef.current || shearDiagramVisibleRef.current || momentDiagramVisibleRef.current)) {
+          const axes = elementAxesForDisplay(a, b, element.localY);
+          const sampleCount = 17;
+          const lengthValue = startPoint.distanceTo(endPoint);
+          if (axialDiagramVisibleRef.current) {
+            const axial = axialDiagramComponent(force, axes.ex, axes, modelTypeRef.current);
+            if (axial) {
+              const values = interpolateAxialValues(axial, 5);
+              const diagram = diagramSamples(startPoint, endPoint, axial.axis, values, maxAxial, sceneSize, axialDiagramScaleRef.current);
+              content.add(createInternalForceDiagram(diagram.base, diagram.diagram, force.axial >= 0 ? "#16a34a" : "#dc2626"));
+            }
+          }
+          if (force.type !== "beam3d") continue;
+          const shear = dominantShearComponent(force, axes);
+          const moment = dominantMomentComponent(force, axes, shear);
+          if (shearDiagramVisibleRef.current && shear) {
+            const values = interpolateShearValues(shear, sampleCount);
+            const diagram = diagramSamples(startPoint, endPoint, shear.axis, values, maxShearDiagram, sceneSize, shearDiagramScaleRef.current);
+            content.add(createInternalForceDiagram(diagram.base, diagram.diagram, "#0ea5e9"));
+          }
+          if (momentDiagramVisibleRef.current && moment) {
+            const coupledShear = shear && vectorToThree(shear.axis).dot(vectorToThree(moment.axis)) > 0.95 ? shear : null;
+            const values = interpolateMomentValues(moment, coupledShear, lengthValue, sampleCount);
+            const diagram = diagramSamples(startPoint, endPoint, moment.axis, values, maxMomentDiagram, sceneSize, momentDiagramScaleRef.current);
+            content.add(createInternalForceDiagram(diagram.base, diagram.diagram, "#c026d3"));
+          }
         }
 
       }
@@ -2629,7 +3084,7 @@ function App() {
         const node = nodeMap.get(load.nodeId);
         if (!node) continue;
         const magnitude = Math.hypot(load.fx ?? 0, load.fy ?? 0, load.fz ?? 0);
-        if (magnitude === 0) continue;
+        if (magnitude < 1e-12) continue;
         const direction = new THREE.Vector3(load.fx ?? 0, load.fz ?? 0, load.fy ?? 0).normalize();
         const origin = toThree(node, currentUnitScale).clone().sub(direction.clone().multiplyScalar(0.8 * symbolScale));
         content.add(new THREE.ArrowHelper(direction, origin, 0.75 * symbolScale, "#d62828", 0.18 * symbolScale, 0.08 * symbolScale));
@@ -2660,7 +3115,7 @@ function App() {
     const findOrCreateNode = (point: Vec3): string => {
       const snap = (value: number) => Number((Math.round(value / gridStep) * gridStep).toFixed(6));
       const x = snap(point.x);
-      const y = snap(point.y);
+      const y = modelTypeRef.current === "2d" ? 0 : snap(point.y);
       const z = snap(point.z);
       const existing = modelRef.current.nodes.find((node) => Math.abs(node.x - x) < 1e-6 && Math.abs(node.y - y) < 1e-6 && Math.abs(node.z - z) < 1e-6);
       if (existing) return existing.id;
@@ -2936,7 +3391,10 @@ function App() {
         saveHistory();
         setModel((current) => {
           const rest = current.boundaries.filter((item) => item.nodeId !== nodeId);
-          return { ...current, boundaries: [...rest, { nodeId, ux: true, uy: true, uz: true, rx: true, ry: true, rz: true }] };
+          const boundary = modelTypeRef.current === "2d"
+            ? { nodeId, ux: true, uz: true, ry: true }
+            : { nodeId, ux: true, uy: true, uz: true, rx: true, ry: true, rz: true };
+          return { ...current, boundaries: [...rest, boundary] };
         });
         setResult(null);
         return;
@@ -3021,10 +3479,12 @@ function App() {
     animate();
 
     return () => {
-      cameraViewRef.current = {
-        position: camera.position.toArray() as [number, number, number],
-        target: controls.target.toArray() as [number, number, number],
-      };
+      if (modelType === "3d") {
+        cameraViewRef.current = {
+          position: camera.position.toArray() as [number, number, number],
+          target: controls.target.toArray() as [number, number, number],
+        };
+      }
       cancelAnimationFrame(animationId);
       window.removeEventListener("resize", resize);
       renderer.domElement.removeEventListener("pointerdown", onPointerDown);
@@ -3042,7 +3502,7 @@ function App() {
       renderer.dispose();
       mount.removeChild(renderer.domElement);
     };
-  }, [loadZ, gridStep, gridBounds, currentUnitScale, gridVisible]);
+  }, [loadZ, gridStep, gridBounds, currentUnitScale, gridVisible, modelType]);
 
   const updateMaterialDraft = (key: "E" | "G" | "density", value: number) => {
     setMaterialDraft((current) => ({ ...current, [key]: value }));
@@ -3118,7 +3578,8 @@ function App() {
 
   const importScriptModel = () => {
     try {
-      const next = parseModelScript(scriptDraft, model, defaultMaterialId, defaultSectionId);
+      const parsed = parseModelScript(scriptDraft, model, defaultMaterialId, defaultSectionId);
+      const next = modelType === "2d" ? projectModelToXzPlane(parsed) : parsed;
       saveHistory();
       setModel(next);
       setSelectedNode(next.nodes[0]?.id ?? null);
@@ -3141,27 +3602,33 @@ function App() {
     setError(en ? "Current model exported to the script editor." : "当前模型已导出到脚本框。");
   };
 
-  const confirmSelectedLoad = () => {
+  const updateSelectedLoadDraft = (key: "fx" | "fy" | "fz", value: number) => {
+    const nextDraft = {
+      ...loadDraft,
+      [key]: value,
+      fy: modelType === "2d" ? 0 : key === "fy" ? value : loadDraft.fy,
+    };
+    setLoadDraft(nextDraft);
     if (!selectedNode) return;
-    saveHistory();
     setModel((current) => {
       const rest = current.loads.filter((item) => item.nodeId !== selectedNode);
-      const next = { nodeId: selectedNode, fx: loadDraft.fx, fy: loadDraft.fy, fz: loadDraft.fz };
-      return { ...current, loads: [...rest, next] };
+      const next = { nodeId: selectedNode, fx: nextDraft.fx, fy: modelType === "2d" ? 0 : nextDraft.fy, fz: nextDraft.fz };
+      const hasLoad = Math.hypot(next.fx ?? 0, next.fy ?? 0, next.fz ?? 0) > 0;
+      return { ...current, loads: hasLoad ? [...rest, next] : rest };
     });
-    setLoadZ(loadDraft.fz);
+    if (key === "fz") setLoadZ(value);
     setResult(null);
     setError(null);
   };
 
-  const confirmSelectedMass = () => {
+  const updateSelectedMassDraft = (value: number) => {
+    const mass = Math.max(0, value);
+    setMassDraft(mass);
     if (!selectedNode) return;
-    saveHistory();
     setModel((current) => {
       const rest = (current.nodalMasses ?? []).filter((item) => item.nodeId !== selectedNode);
-      return { ...current, nodalMasses: [...rest, { nodeId: selectedNode, mass: Math.max(0, massDraft) }] };
+      return { ...current, nodalMasses: mass > 0 ? [...rest, { nodeId: selectedNode, mass }] : rest };
     });
-    setResult(null);
     setModalResult(null);
     setError(null);
   };
@@ -3219,14 +3686,55 @@ function App() {
   };
 
   const setSelectedElementType = (type: ElementType) => {
-    if (!selectedElementData || selectedElementData.type === type) return;
+    if (!selectedElementData) return;
+    const hasEndSettings = Boolean(selectedElementData.releaseStart || selectedElementData.releaseEnd);
+    if (selectedElementData.type === type && !hasEndSettings) return;
     saveHistory();
     setModel((current) => ({
       ...current,
-      elements: current.elements.map((element) => element.id === selectedElementData.id ? { ...element, type } : element),
+      elements: current.elements.map((element) => element.id === selectedElementData.id
+        ? { ...element, type, releaseStart: undefined, releaseEnd: undefined }
+        : element),
       elementLoads: type === "bar3d"
         ? (current.elementLoads ?? []).filter((load) => load.elementId !== selectedElementData.id)
         : (current.elementLoads ?? []),
+    }));
+    setResult(null);
+    setModalResult(null);
+    setError(null);
+  };
+
+  const setSelectedElementHinged = () => {
+    if (!selectedElementData) return;
+    saveHistory();
+    setModel((current) => ({
+      ...current,
+      elements: current.elements.map((element) => element.id === selectedElementData.id
+        ? {
+            ...element,
+            type: "beam3d",
+            releaseStart: { ...element.releaseStart, ry: true, rz: true },
+            releaseEnd: { ...element.releaseEnd, ry: true, rz: true },
+          }
+        : element),
+    }));
+    setResult(null);
+    setModalResult(null);
+    setError(null);
+  };
+
+  const setSelectedElementEndConnection = (side: "start" | "end", connection: "hinged" | "rigid") => {
+    if (!selectedElementData) return;
+    saveHistory();
+    const release = connection === "hinged" ? { ry: true, rz: true } : { ry: false, rz: false };
+    setModel((current) => ({
+      ...current,
+      elements: current.elements.map((element) => {
+        if (element.id !== selectedElementData.id) return element;
+        return side === "start"
+          ? { ...element, type: "beam3d", releaseStart: { ...element.releaseStart, ...release } }
+          : { ...element, type: "beam3d", releaseEnd: { ...element.releaseEnd, ...release } };
+      }),
     }));
     setResult(null);
     setModalResult(null);
@@ -3245,8 +3753,9 @@ function App() {
   };
 
   const checkConstraints = () => {
-    const warning = diagnoseUnderconstrainedMembers(model);
-    const rigidSuggestion = findRigidJointStabilizers(convertModelToMeters(model, currentUnitScale));
+    const analysisModel = prepareModelForAnalysis(model, modelType);
+    const warning = diagnoseUnderconstrainedMembers(analysisModel);
+    const rigidSuggestion = findRigidJointStabilizers(convertModelToMeters(analysisModel, currentUnitScale));
     const mergedWarning: ConstraintWarning = {
       nodeIds: Array.from(new Set([...warning.nodeIds, ...rigidSuggestion])),
       elementIds: Array.from(new Set([...warning.elementIds, ...connectedElementIds(model, rigidSuggestion)])),
@@ -3303,6 +3812,7 @@ function App() {
     setPendingNode(null);
     setTool("member");
     setUnit("cm");
+    setModelType("3d");
     setGridStep(defaultGridStepByUnit.cm);
     setGridVisible(true);
     setOffset({ dx: defaultGridStepByUnit.cm, dy: 0, dz: 0 });
@@ -3367,7 +3877,7 @@ function App() {
           coordinate,
           position: Math.min(1, Math.max(0, elementLoadDraft.position)),
           fx: elementLoadDraft.x,
-          fy: elementLoadDraft.y,
+          fy: modelType === "2d" ? 0 : elementLoadDraft.y,
           fz: elementLoadDraft.z,
         }
       : {
@@ -3376,7 +3886,7 @@ function App() {
           type: "distributed",
           coordinate,
           wx: elementLoadDraft.x,
-          wy: elementLoadDraft.y,
+          wy: modelType === "2d" ? 0 : elementLoadDraft.y,
           wz: elementLoadDraft.z,
         };
     saveHistory();
@@ -3405,7 +3915,7 @@ function App() {
     if (!base) return;
     const target = {
       x: Number((base.x + offset.dx).toFixed(6)),
-      y: Number((base.y + offset.dy).toFixed(6)),
+      y: modelType === "2d" ? 0 : Number((base.y + offset.dy).toFixed(6)),
       z: Number((base.z + offset.dz).toFixed(6)),
     };
     if (samePoint(base, target)) {
@@ -3453,7 +3963,7 @@ function App() {
   const createCoordinateNode = () => {
     const target = {
       x: Number(coordinateNode.x.toFixed(6)),
-      y: Number(coordinateNode.y.toFixed(6)),
+      y: modelType === "2d" ? 0 : Number(coordinateNode.y.toFixed(6)),
       z: Number(coordinateNode.z.toFixed(6)),
     };
     const existing = model.nodes.find((node) => samePoint(node, target));
@@ -3487,11 +3997,12 @@ function App() {
       version: "1.0",
       savedAt: new Date().toISOString(),
       unit,
+      modelType,
       gridStep,
       gridVisible,
       loadZ,
-      offset,
-      coordinateNode,
+      offset: modelType === "2d" ? { ...offset, dy: 0 } : offset,
+      coordinateNode: modelType === "2d" ? { ...coordinateNode, y: 0 } : coordinateNode,
       defaultMaterialId,
       defaultSectionId,
       language,
@@ -3502,7 +4013,7 @@ function App() {
     const link = document.createElement("a");
     const timestamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
     link.href = url;
-    link.download = `FrameSolve-3D-${timestamp}.json`;
+    link.download = `FrameGuide-2D-3D-${timestamp}.json`;
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -3514,26 +4025,30 @@ function App() {
     try {
       const text = await file.text();
       const parsed = JSON.parse(text) as Partial<ProjectFile>;
-      if ((parsed.app !== appName && parsed.app !== "BeamBar3D") || !isStructureModel(parsed.model)) {
+      if ((parsed.app !== appName && parsed.app !== "结构力学" && parsed.app !== "Frame3D" && parsed.app !== "FrameSolve 3D" && parsed.app !== "BeamBar3D") || !isStructureModel(parsed.model)) {
         throw new Error(en ? `This is not a valid ${appName} project file.` : `不是有效的 ${appName} 项目文件。`);
       }
       const nextUnit = isUnitKey(parsed.unit) ? parsed.unit : "cm";
+      const nextModelType = isModelType(parsed.modelType) ? parsed.modelType : "3d";
       const nextModel = {
         ...parsed.model,
         materials: parsed.model.materials.map((material) => ({ ...material, density: material.density ?? 500 })),
         elementLoads: parsed.model.elementLoads ?? [],
         nodalMasses: parsed.model.nodalMasses ?? [],
       };
-      const split = splitElementsAtIntermediateNodes(nextModel);
+      const split = splitElementsAtIntermediateNodes(nextModelType === "2d" ? projectModelToXzPlane(nextModel) : nextModel);
       saveHistory();
       setModel(split.model);
       setUnit(nextUnit);
+      setModelType(nextModelType);
       setGridStep(toFiniteNumber(parsed.gridStep, defaultGridStepByUnit[nextUnit]));
       setGridVisible(typeof parsed.gridVisible === "boolean" ? parsed.gridVisible : true);
       if (parsed.language === "zh" || parsed.language === "en") setLanguage(parsed.language);
       setLoadZ(toFiniteNumber(parsed.loadZ, -15000));
-      setOffset(toOffset(parsed.offset, { dx: 5, dy: 0, dz: 0 }));
-      setCoordinateNode(toVec3(parsed.coordinateNode, { x: 0, y: 0, z: 0 }));
+      const nextOffset = toOffset(parsed.offset, { dx: 5, dy: 0, dz: 0 });
+      const nextCoordinateNode = toVec3(parsed.coordinateNode, { x: 0, y: 0, z: 0 });
+      setOffset(nextModelType === "2d" ? { ...nextOffset, dy: 0 } : nextOffset);
+      setCoordinateNode(nextModelType === "2d" ? { ...nextCoordinateNode, y: 0 } : nextCoordinateNode);
       setDefaultMaterialId(split.model.materials.some((material) => material.id === parsed.defaultMaterialId) ? parsed.defaultMaterialId! : split.model.materials[0]?.id ?? "wood");
       setDefaultSectionId(split.model.sections.some((section) => section.id === parsed.defaultSectionId) ? parsed.defaultSectionId! : split.model.sections[0]?.id ?? "timber100");
       setSelectedNode(split.model.nodes[0]?.id ?? null);
@@ -3553,7 +4068,13 @@ function App() {
 
   return (
     <main className="app">
-      <section className="viewport" ref={mountRef} />
+      <section className="viewport" ref={mountRef}>
+        <div className="canvasStats">
+          <span>{text.nodes} {model.nodes.length}</span>
+          <span>{text.elements} {model.elements.length}</span>
+          <span>{tool === "delete" ? text.deleting : selectedElement ? `${text.selected} ${selectedElement}` : pendingNode ? `${text.start} ${pendingNode}` : text.pickGrid}</span>
+        </div>
+      </section>
       {hoverInfo && (
         <div className="hoverTooltip" style={{ left: hoverInfo.x + 14, top: hoverInfo.y + 14 }}>
           {hoverInfo.lines.map((line) => <span key={line}>{line}</span>)}
@@ -3572,7 +4093,7 @@ function App() {
             <div className="helpBody">
               <section>
                 <h3>{text.productGuide}</h3>
-                <p>{en ? "FrameSolve 3D is a fast 3D frame/truss modeling, solving, and result visualization tool. New members are bars by default; switch to beam elements when bending, shear, member loads, or rigid-frame behavior is needed." : "FrameSolve 3D 用于三维杆系/桁架优先的快速建模、求解与结果查看。默认新建杆单元；需要弯矩、剪力、梁荷载或刚接框架时，可将单元切换为梁单元。"}</p>
+                <p>{en ? "FrameGuide 2D/3D is a fast frame and truss modeling, solving, and result visualization tool. New members are bars by default; switch to beam elements when bending, shear, member loads, or rigid-frame behavior is needed." : "FrameGuide 2D/3D 用于 2D/3D 杆系与梁单元的快速建模、求解与结果查看。默认新建杆单元；需要弯矩、剪力、梁荷载或刚接框架时，可将单元切换为梁单元。"}</p>
                 <p>{en ? "Built-in examples carry their own unit systems. When loaded, coordinates are inserted 1:1 in that unit and the grid spacing switches automatically. Materials and sections can be selected as defaults before creating members." : "典型模型带有自己的单位系统，加载时会按该单位 1:1 放入模型并自动切换 grid 间距。材料与截面可先设为默认标签，再用于后续新建杆件。"}</p>
                 <p>{en ? "Supports spatial grid picking, member 1/3-midpoint-2/3 snap splitting, coordinate-based node creation, offset creation, nodal constraints and loads, point masses, project save/load, and Ctrl+Z undo. After solving, axial force tension/compression colors, deformation, omega, frequency f, modal scale, and animated mode shapes are available." : "支持空间 grid 拾取、梁杆 1/3-中点-2/3 拾取分割、坐标新建、按偏移新建、节点约束与荷载、集中质量、保存/读取项目、Ctrl+Z 撤销。求解后可显示轴力拉压颜色和变形；频率分析可选择阶数、显示 omega 与 f，调整模态 scale，并用动态振型查看不同模态。"}</p>
               </section>
@@ -3667,7 +4188,7 @@ function App() {
       <aside className="sidebar">
         <header className="brand">
           <div>
-            <strong>FrameSolve 3D</strong>
+            <strong>FrameGuide 2D/3D</strong>
             <span>{text.subtitle}</span>
           </div>
           <div className="headerActions">
@@ -3694,13 +4215,9 @@ function App() {
             >
               <RefreshCcw size={18} />
             </button>
+            <button className="iconButton languageMiniButton" onClick={() => setLanguage(en ? "zh" : "en")} title={text.language}>{en ? "中" : "En"}</button>
           </div>
         </header>
-
-        <div className="languageSwitch" aria-label={text.language}>
-          <button className={language === "zh" ? "active" : ""} onClick={() => setLanguage("zh")}>{text.chinese}</button>
-          <button className={language === "en" ? "active" : ""} onClick={() => setLanguage("en")}>{text.english}</button>
-        </div>
 
         <div className="toolbar">
           <button className={tool === "member" ? "active" : ""} onClick={() => setTool("member")} title={text.pickMember}><Link2 size={17} />{text.member}</button>
@@ -3711,21 +4228,33 @@ function App() {
           <button className={tool === "delete" ? "active" : ""} onClick={toggleDeleteMode} title={text.deleteSelected} disabled={tool !== "delete" && model.nodes.length === 0 && model.elements.length === 0}><Trash2 size={17} />{text.deleteSelected}</button>
         </div>
 
-        <div className="stats">
-          <span>{text.nodes} {model.nodes.length}</span>
-          <span>{text.elements} {model.elements.length}</span>
-          <span>{tool === "delete" ? text.deleting : selectedElement ? `${text.selected} ${selectedElement}` : pendingNode ? `${text.start} ${pendingNode}` : text.pickGrid}</span>
-        </div>
-
         <section className="panel compactPanel">
-          <h2>{text.examples}</h2>
-          <label className="selectField">
-            <span>{text.example}</span>
+          <div className="exampleInline">
             <select value={selectedExample} onChange={(event) => setSelectedExample(event.target.value as ExampleKey)}>
               {exampleModels.map((example) => <option key={example.key} value={example.key}>{en ? example.nameEn : example.name} ({unitLabels[example.unit]})</option>)}
             </select>
-          </label>
-          <button onClick={() => loadExampleModel()}><RefreshCcw size={17} />{text.loadExample}</button>
+            <button onClick={() => loadExampleModel()}><RefreshCcw size={17} />{text.loadExample}</button>
+          </div>
+        </section>
+
+        <section className="panel compactPanel">
+          <div className="unitModelInline">
+            <label className="unitInline">
+              <span>{text.unitSystem}</span>
+              <select value={unit} onChange={(event) => changeUnit(event.target.value as UnitKey)}>
+                {(["m", "cm", "mm"] as UnitKey[]).map((item) => (
+                  <option key={item} value={item}>{unitLabels[item]}</option>
+                ))}
+              </select>
+            </label>
+            <label className="modelTypeInline">
+              <span>{text.modelType}</span>
+              <select className={modelType === "2d" ? "plane2dSelect" : ""} value={modelType} onChange={(event) => changeModelType(event.target.value as ModelType)}>
+                <option value="3d">{text.model3d}</option>
+                <option value="2d">{text.model2d}</option>
+              </select>
+            </label>
+          </div>
         </section>
 
         <section className="panel collapsiblePanel">
@@ -3746,27 +4275,44 @@ function App() {
         </section>
 
         <section className="panel compactPanel">
-          <h2>{text.select}</h2>
-          <p className="selectionText">
+          <div className="selectionHeader">
+            <h2>{text.select}</h2>
+            <span>
             {selectedElementData
               ? `${selectedElementData.id}: ${selectedElementData.startNodeId} -> ${selectedElementData.endNodeId} · ${selectedElementKind ? elementTypeLabel(selectedElementKind, language) : ""}`
               : selectedNode
                 ? `${text.node} ${selectedNode}`
                 : text.noSelection}
-          </p>
-          <div className="typeLegend" aria-label={en ? "Element color legend" : "单元颜色图例"}>
-            <span><i style={{ background: elementTypeColor("bar") }} />{text.bar}</span>
-            <span><i style={{ background: elementTypeColor("beam") }} />{text.beam}</span>
-            <span><i style={{ background: elementTypeColor("mixed") }} />{text.hingedBeam}</span>
+            </span>
+          </div>
+          <div className="elementActionRow">
+            <button className={selectedElementKind === "bar" ? "active" : ""} onClick={() => setSelectedElementType("bar3d")} disabled={!selectedElementData}>
+              <i style={{ background: elementTypeColor("bar") }} />{text.bar}
+            </button>
+            <button className={selectedElementKind === "beam" ? "active" : ""} onClick={() => setSelectedElementType("beam3d")} disabled={!selectedElementData}>
+              <i style={{ background: elementTypeColor("beam") }} />{text.beam}
+            </button>
+            <button className={selectedElementKind === "mixed" ? "active" : ""} onClick={setSelectedElementHinged} disabled={!selectedElementData}>
+              <i style={{ background: elementTypeColor("mixed") }} />{text.hinged}
+            </button>
+            <button className="primary" onClick={autoClassifyElements} disabled={model.elements.length === 0}><RefreshCcw size={17} />{text.autoClassify}</button>
           </div>
           {selectedElementData && (
             <div className="selectedElementControls">
-              <div className="segmented twoSegment">
-                <button className={selectedElementData.type === "bar3d" ? "active" : ""} onClick={() => setSelectedElementType("bar3d")}>
-                  {text.barElement}
+              <div className="endConnectionGrid" aria-label={text.endConnection}>
+                <span><i style={{ background: elementStartColor }} />{text.startEnd}</span>
+                <button className={selectedElementStartConnection === "rigid" ? "active" : ""} onClick={() => setSelectedElementEndConnection("start", "rigid")}>
+                  {text.rigid}
                 </button>
-                <button className={selectedElementData.type === "beam3d" ? "active" : ""} onClick={() => setSelectedElementType("beam3d")}>
-                  {text.beamElement}
+                <button className={selectedElementStartConnection === "hinged" ? "active" : ""} onClick={() => setSelectedElementEndConnection("start", "hinged")}>
+                  {text.hinged}
+                </button>
+                <span><i style={{ background: elementEndColor }} />{text.endEnd}</span>
+                <button className={selectedElementEndConnection === "rigid" ? "active" : ""} onClick={() => setSelectedElementEndConnection("end", "rigid")}>
+                  {text.rigid}
+                </button>
+                <button className={selectedElementEndConnection === "hinged" ? "active" : ""} onClick={() => setSelectedElementEndConnection("end", "hinged")}>
+                  {text.hinged}
                 </button>
               </div>
               <label className="selectField">
@@ -3777,12 +4323,6 @@ function App() {
               </label>
             </div>
           )}
-          <button onClick={autoClassifyElements} disabled={model.elements.length === 0}><RefreshCcw size={17} />{text.autoClassify}</button>
-          <button onClick={checkConstraints} disabled={model.elements.length === 0}><Eye size={17} />{text.checkConstraints}</button>
-          <div className="mergeControls">
-            <NumberField label={`${text.mergeTolerance} ${unitLabels[unit]}`} value={mergeTolerance} onChange={(value) => setMergeTolerance(Math.max(0, value))} />
-            <button onClick={mergeCloseNodes} disabled={model.nodes.length < 2}><Link2 size={17} />{text.mergeCloseNodes}</button>
-          </div>
           {tool === "delete" && <p className="selectionText">{text.deleteMode}</p>}
         </section>
 
@@ -3800,12 +4340,12 @@ function App() {
                 {elementLoadDraft.coordinate === "global" ? text.global : text.local}
               </button>
             </div>
-            {elementLoadDraft.type === "point" && (
-              <NumberField label="a/L" value={elementLoadDraft.position} onChange={(value) => setElementLoadDraft((current) => ({ ...current, position: value }))} />
-            )}
-            <div className="loadGrid">
+            <div className={elementLoadDraft.type === "point" ? "beamLoadGrid pointLoadGrid" : "beamLoadGrid"}>
+              {elementLoadDraft.type === "point" && (
+                <NumberField label="a/L" value={elementLoadDraft.position} onChange={(value) => setElementLoadDraft((current) => ({ ...current, position: value }))} />
+              )}
               <NumberField label={elementLoadDraft.type === "point" ? "X N" : `qx N/${unitLabels[unit]}`} value={elementLoadDraft.x} onChange={(value) => setElementLoadDraft((current) => ({ ...current, x: value }))} />
-              <NumberField label={elementLoadDraft.type === "point" ? "Y N" : `qy N/${unitLabels[unit]}`} value={elementLoadDraft.y} onChange={(value) => setElementLoadDraft((current) => ({ ...current, y: value }))} />
+              {modelType === "3d" && <NumberField label={elementLoadDraft.type === "point" ? "Y N" : `qy N/${unitLabels[unit]}`} value={elementLoadDraft.y} onChange={(value) => setElementLoadDraft((current) => ({ ...current, y: value }))} />}
               <NumberField label={elementLoadDraft.type === "point" ? "Z N" : `qz N/${unitLabels[unit]}`} value={elementLoadDraft.z} onChange={(value) => setElementLoadDraft((current) => ({ ...current, z: value }))} />
             </div>
             <button onClick={addElementLoad}><Plus size={17} />{text.addBeamLoad}</button>
@@ -3826,17 +4366,6 @@ function App() {
             )}
           </section>
         )}
-
-        <section className="panel compactPanel">
-          <h2>{text.unitSystem}</h2>
-          <div className="segmented">
-            {(["m", "cm", "mm"] as UnitKey[]).map((item) => (
-              <button key={item} className={unit === item ? "active" : ""} onClick={() => changeUnit(item)}>
-                {unitLabels[item]}
-              </button>
-            ))}
-          </div>
-        </section>
 
         <section className="panel collapsiblePanel">
           <button className="panelToggle" onClick={() => setMaterialOpen((open) => !open)} aria-expanded={materialOpen}>
@@ -3907,19 +4436,23 @@ function App() {
         <section className="panel">
           <h2>{text.numericCreate} ({unitLabels[unit]})</h2>
           <p className="selectionText">{text.absoluteCoordinates}</p>
-          <div className="offsetGrid">
-            <NumberField label="x" value={coordinateNode.x} onChange={(value) => setCoordinateNode((current) => ({ ...current, x: value }))} />
-            <NumberField label="y" value={coordinateNode.y} onChange={(value) => setCoordinateNode((current) => ({ ...current, y: value }))} />
-            <NumberField label="z" value={coordinateNode.z} onChange={(value) => setCoordinateNode((current) => ({ ...current, z: value }))} />
+          <div className="createInline">
+            <div className={`offsetGrid ${modelType === "2d" ? "plane2dGrid" : ""}`}>
+              <NumberField label="x" value={coordinateNode.x} onChange={(value) => setCoordinateNode((current) => ({ ...current, x: value }))} />
+              {modelType === "3d" && <NumberField label="y" value={coordinateNode.y} onChange={(value) => setCoordinateNode((current) => ({ ...current, y: value }))} />}
+              <NumberField label="z" value={coordinateNode.z} onChange={(value) => setCoordinateNode((current) => ({ ...current, z: value }))} />
+            </div>
+            <button className="primary" onClick={createCoordinateNode}><Plus size={17} />{text.createNode}</button>
           </div>
-          <button onClick={createCoordinateNode}><Plus size={17} />{text.createNode}</button>
           <p className="selectionText">{text.relativeToSelected} {selectedNode ? selectedNode : ""}</p>
-          <div className="offsetGrid">
-            <NumberField label="dx" value={offset.dx} onChange={(value) => setOffset((current) => ({ ...current, dx: value }))} />
-            <NumberField label="dy" value={offset.dy} onChange={(value) => setOffset((current) => ({ ...current, dy: value }))} />
-            <NumberField label="dz" value={offset.dz} onChange={(value) => setOffset((current) => ({ ...current, dz: value }))} />
+          <div className="createInline">
+            <div className={`offsetGrid ${modelType === "2d" ? "plane2dGrid" : ""}`}>
+              <NumberField label="dx" value={offset.dx} onChange={(value) => setOffset((current) => ({ ...current, dx: value }))} />
+              {modelType === "3d" && <NumberField label="dy" value={offset.dy} onChange={(value) => setOffset((current) => ({ ...current, dy: value }))} />}
+              <NumberField label="dz" value={offset.dz} onChange={(value) => setOffset((current) => ({ ...current, dz: value }))} />
+            </div>
+            <button className="primary" onClick={createOffsetMember} disabled={!selectedNode}><Plus size={17} />{text.createAndConnect}</button>
           </div>
-          <button onClick={createOffsetMember} disabled={!selectedNode}><Plus size={17} />{text.createAndConnect}</button>
         </section>
 
         <section className="panel">
@@ -3941,7 +4474,7 @@ function App() {
             </button>
           </div>
           <div className="dofGrid">
-            {dofKeys.map((key) => {
+            {visibleDofKeys.map((key) => {
               return (
                 <button key={key} className={selectedBoundary?.[key] ? "active" : ""} onClick={() => toggleBoundary(key)} disabled={!selectedNode}>
                   {key}
@@ -3950,7 +4483,7 @@ function App() {
             })}
           </div>
           <div className="boundaryValueGrid">
-            {dofKeys.map((key) => (
+            {visibleDofKeys.map((key) => (
               <NumberField
                 key={key}
                 label={`${key} ${key.startsWith("u") ? unitLabels[unit] : "rad"}`}
@@ -3961,15 +4494,22 @@ function App() {
             ))}
           </div>
           <div className="loadGrid">
-            <NumberField label="Fx N" value={loadDraft.fx} onChange={(value) => setLoadDraft((current) => ({ ...current, fx: value }))} disabled={!selectedNode} />
-            <NumberField label="Fy N" value={loadDraft.fy} onChange={(value) => setLoadDraft((current) => ({ ...current, fy: value }))} disabled={!selectedNode} />
-            <NumberField label="Fz N" value={loadDraft.fz} onChange={(value) => setLoadDraft((current) => ({ ...current, fz: value }))} disabled={!selectedNode} />
+            <NumberField label="Fx N" value={loadDraft.fx} onChange={(value) => updateSelectedLoadDraft("fx", value)} disabled={!selectedNode} />
+            {modelType === "3d" && <NumberField label="Fy N" value={loadDraft.fy} onChange={(value) => updateSelectedLoadDraft("fy", value)} disabled={!selectedNode} />}
+            <NumberField label="Fz N" value={loadDraft.fz} onChange={(value) => updateSelectedLoadDraft("fz", value)} disabled={!selectedNode} />
           </div>
-          <button onClick={confirmSelectedLoad} disabled={!selectedNode}><CircleDot size={17} />{text.confirmLoad}</button>
           <div className="massControls">
-            <NumberField label="m kg" value={massDraft} onChange={setMassDraft} disabled={!selectedNode} />
-            <button onClick={confirmSelectedMass} disabled={!selectedNode}><Plus size={17} />{text.confirmMass}</button>
+            <NumberField label="m kg" value={massDraft} onChange={updateSelectedMassDraft} disabled={!selectedNode} />
+            <span className="massHint">{text.massHint}</span>
             <button onClick={deleteSelectedMass} disabled={!selectedNode || !selectedMass}><Trash2 size={17} />{text.deleteMass}</button>
+          </div>
+        </section>
+
+        <section className="panel compactPanel">
+          <div className="checkInline">
+          <button onClick={checkConstraints} disabled={model.elements.length === 0}><Eye size={17} />{text.checkConstraints}</button>
+            <NumberField label={`${text.mergeTolerance} ${unitLabels[unit]}`} value={mergeTolerance} onChange={(value) => setMergeTolerance(Math.max(0, value))} />
+            <button onClick={mergeCloseNodes} disabled={model.nodes.length < 2}><Link2 size={17} />{text.mergeCloseNodes}</button>
           </div>
         </section>
 
@@ -4008,10 +4548,34 @@ function App() {
         </section>
 
         <div className="actions">
-          <button className={result ? "active" : ""} onClick={runSolve}><Play size={18} />{text.solve}</button>
-          <button className={modalResult ? "active" : ""} onClick={runModalAnalysis}><Sigma size={18} />{text.frequency}</button>
+          <button className={`primary ${result ? "active" : ""}`} onClick={runSolve}><Play size={18} />{text.solve}</button>
+          <button className={`primary ${modalResult ? "active" : ""}`} onClick={runModalAnalysis}><Sigma size={18} />{text.frequency}</button>
           <button onClick={clearModel}><Eraser size={18} />{text.clear}</button>
         </div>
+
+        <section className="panel compactPanel resultDiagramPanel">
+          <div className="diagramScaleTitle">{text.diagramScaleTitle}</div>
+          <div className="diagramScaleGrid">
+            <NumberField label={text.axialForceLineScale} value={axialForceLineScale} onChange={(value) => setAxialForceLineScale(Math.max(0, value))} disabled={!result} />
+            <NumberField label={text.axialDiagramScale} value={axialDiagramScale} onChange={(value) => setAxialDiagramScale(Math.max(0, value))} disabled={!result} />
+            <NumberField label={text.shearDiagramScale} value={shearDiagramScale} onChange={(value) => setShearDiagramScale(Math.max(0, value))} disabled={!result} />
+            <NumberField label={text.momentDiagramScale} value={momentDiagramScale} onChange={(value) => setMomentDiagramScale(Math.max(0, value))} disabled={!result} />
+          </div>
+          <div className="diagramToggleGrid">
+            <button className={axialForceLineVisible ? "active axialLineToggle" : "axialLineToggle"} onClick={() => setAxialForceLineVisible((visible) => !visible)} disabled={!result}>
+              {text.axialForceLine}
+            </button>
+            <button className={axialDiagramVisible ? "active axialToggle" : "axialToggle"} onClick={() => setAxialDiagramVisible((visible) => !visible)} disabled={!result}>
+              {text.axialDiagram}
+            </button>
+            <button className={shearDiagramVisible ? "active shearToggle" : "shearToggle"} onClick={() => setShearDiagramVisible((visible) => !visible)} disabled={!result}>
+              {text.shearDiagram}
+            </button>
+            <button className={momentDiagramVisible ? "active momentToggle" : "momentToggle"} onClick={() => setMomentDiagramVisible((visible) => !visible)} disabled={!result}>
+              {text.momentDiagram}
+            </button>
+          </div>
+        </section>
 
         {error && <div className="error">{error}</div>}
 
@@ -4021,12 +4585,12 @@ function App() {
 }
 
 function NumberField({ label, value, onChange, disabled = false }: { label: string; value: number; onChange: (value: number) => void; disabled?: boolean }) {
-  const [draft, setDraft] = useState(() => String(Number.isFinite(value) ? value : 0));
+  const [draft, setDraft] = useState(() => formatNumberInputValue(value));
   const focusedRef = useRef(false);
 
   useEffect(() => {
     if (focusedRef.current) return;
-    setDraft(String(Number.isFinite(value) ? value : 0));
+    setDraft(formatNumberInputValue(value));
   }, [value]);
 
   const updateDraft = (text: string) => {
@@ -4037,11 +4601,11 @@ function NumberField({ label, value, onChange, disabled = false }: { label: stri
   const normalizeDraft = () => {
     focusedRef.current = false;
     if (!isCompleteNumberInput(draft)) {
-      setDraft(String(Number.isFinite(value) ? value : 0));
+      setDraft(formatNumberInputValue(value));
       return;
     }
     const next = Number(draft);
-    setDraft(String(next));
+    setDraft(formatNumberInputValue(next));
     onChange(next);
   };
 
@@ -4050,7 +4614,9 @@ function NumberField({ label, value, onChange, disabled = false }: { label: stri
       <span>{label}</span>
       <input
         type="text"
-        inputMode="decimal"
+        inputMode="text"
+        autoComplete="off"
+        spellCheck={false}
         value={draft}
         disabled={disabled}
         onFocus={() => { focusedRef.current = true; }}

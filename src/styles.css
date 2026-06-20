@@ -2,6 +2,10 @@
   font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color: #18212f;
   background: #f6f8fb;
+  --control-height: 24px;
+  --control-radius: 4px;
+  --control-font-size: 12px;
+  --control-border: #cfd8e3;
 }
 
 * {
@@ -14,18 +18,42 @@ body {
 
 button,
 input,
+select,
 textarea {
   font: inherit;
 }
 
 .app {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 336px;
+  grid-template-columns: minmax(0, 1fr) 437px;
   min-height: 100vh;
 }
 
 .viewport {
+  position: relative;
   min-height: 100vh;
+}
+
+.canvasStats {
+  position: absolute;
+  top: 10px;
+  left: 12px;
+  z-index: 6;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  max-width: calc(100% - 24px);
+  color: rgba(24, 33, 47, 0.78);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.25;
+  pointer-events: none;
+  user-select: none;
+}
+
+.canvasStats span {
+  white-space: nowrap;
 }
 
 .hoverTooltip {
@@ -93,10 +121,10 @@ textarea {
 
 .colorPickerField input {
   width: 100%;
-  height: 34px;
+  height: var(--control-height);
   padding: 2px;
-  border: 1px solid #cfd8e3;
-  border-radius: 7px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--control-radius);
   background: #ffffff;
 }
 
@@ -107,7 +135,7 @@ textarea {
 }
 
 .colorSwatches button {
-  min-height: 28px;
+  min-height: var(--control-height);
   border-color: rgba(24, 33, 47, 0.22);
 }
 
@@ -190,9 +218,9 @@ textarea {
 
 .brand {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 8px;
+  gap: 6px;
 }
 
 .brand strong {
@@ -210,22 +238,23 @@ textarea {
 
 .headerActions {
   display: flex;
-  flex-wrap: wrap;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
   justify-content: flex-end;
-  gap: 4px;
+  gap: 3px;
 }
 
 .languageSwitch {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr;
   gap: 5px;
 }
 
 .languageSwitch button {
-  min-height: 27px;
+  min-height: var(--control-height);
   padding: 0 7px;
   border: 1px solid #d8e0ea;
-  border-radius: 7px;
+  border-radius: var(--control-radius);
   background: #f8fafc;
   color: #344054;
   font-size: 12px;
@@ -238,13 +267,18 @@ textarea {
   font-weight: 700;
 }
 
+.languageMiniButton {
+  font-size: 11px;
+  font-weight: 700;
+}
+
 .hiddenFileInput {
   display: none;
 }
 
 .toolbar {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 4px;
 }
 
@@ -254,14 +288,14 @@ button {
   justify-content: center;
   min-width: 0;
   gap: 3px;
-  min-height: 26px;
+  min-height: var(--control-height);
   padding: 0 6px;
-  border: 1px solid #cfd8e3;
-  border-radius: 7px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--control-radius);
   background: #ffffff;
   color: #243044;
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--control-font-size);
   line-height: 1.15;
 }
 
@@ -286,29 +320,9 @@ button:disabled {
 }
 
 .iconButton {
-  width: 27px;
-  min-height: 27px;
+  width: var(--control-height);
+  min-height: var(--control-height);
   padding: 0;
-}
-
-.stats {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 5px;
-}
-
-.stats span {
-  min-width: 0;
-  padding: 5px 6px;
-  border: 1px solid #dbe3ee;
-  border-radius: 8px;
-  background: #f8fafc;
-  color: #49566a;
-  font-size: 12px;
-  text-align: center;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .panel {
@@ -337,7 +351,7 @@ button:disabled {
 .panelToggle {
   justify-content: flex-start;
   width: 100%;
-  min-height: 28px;
+  min-height: var(--control-height);
   padding: 0;
   border: 0;
   background: transparent;
@@ -369,6 +383,87 @@ button:disabled {
   gap: 5px;
 }
 
+.exampleInline {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 72px;
+  align-items: center;
+  gap: 5px;
+}
+
+.exampleInline select {
+  width: 100%;
+  min-width: 0;
+  min-height: var(--control-height);
+  padding: 2px 5px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--control-radius);
+  background: #ffffff;
+  color: #243044;
+  font-size: var(--control-font-size);
+}
+
+.unitInline {
+  display: grid;
+  grid-template-columns: auto 88px;
+  align-items: center;
+  justify-content: start;
+  gap: 6px;
+}
+
+.unitModelInline {
+  display: grid;
+  grid-template-columns: minmax(0, auto) minmax(0, auto);
+  align-items: center;
+  gap: 10px;
+}
+
+.modelTypeInline {
+  display: grid;
+  grid-template-columns: auto 72px;
+  align-items: center;
+  gap: 6px;
+}
+
+.unitInline span,
+.modelTypeInline span {
+  color: #556173;
+  font-size: var(--control-font-size);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.unitInline select,
+.modelTypeInline select {
+  width: 100%;
+  min-width: 0;
+  min-height: var(--control-height);
+  padding: 2px 5px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--control-radius);
+  background: #ffffff;
+  color: #243044;
+  font-size: var(--control-font-size);
+}
+
+.modelTypeInline select.plane2dSelect {
+  border-color: #b8c0cc;
+  background: #eef1f5;
+  color: #475467;
+}
+
+.checkInline {
+  display: grid;
+  grid-template-columns: minmax(76px, 0.8fr) minmax(0, 1fr) minmax(92px, 0.95fr);
+  align-items: center;
+  gap: 5px;
+}
+
+.checkInline button {
+  min-height: var(--control-height);
+  padding: 0 5px;
+  font-size: var(--control-font-size);
+}
+
 .rangeField {
   display: grid;
   gap: 5px;
@@ -376,7 +471,7 @@ button:disabled {
 
 .rangeField span {
   color: #556173;
-  font-size: 13px;
+  font-size: var(--control-font-size);
 }
 
 .rangeField input {
@@ -418,23 +513,151 @@ button:disabled {
 }
 
 .segmented button {
-  min-height: 26px;
+  min-height: var(--control-height);
 }
 
 .displayModeGrid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 4px;
 }
 
 .displayModeGrid button {
-  min-height: 25px;
+  min-height: var(--control-height);
   padding: 0 4px;
+}
+
+.diagramToggleGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.diagramScaleGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.diagramScaleGrid .numberField {
+  grid-template-columns: 34px minmax(0, 1fr);
+}
+
+.diagramScaleGrid .numberField label {
+  font-size: 0.76rem;
+}
+
+.diagramToggleGrid button {
+  min-height: var(--control-height);
+  padding: 0 6px;
+}
+
+.diagramToggleGrid button.axialLineToggle.active {
+  background: #dc2626;
+  border-color: #b91c1c;
+  color: #ffffff;
+}
+
+.diagramToggleGrid button.axialToggle.active {
+  background: #16a34a;
+  border-color: #15803d;
+  color: #ffffff;
+}
+
+.diagramToggleGrid button.shearToggle.active {
+  background: #0ea5e9;
+  border-color: #0b8ec7;
+  color: #ffffff;
+}
+
+.diagramToggleGrid button.momentToggle.active {
+  background: #c026d3;
+  border-color: #a21caf;
+  color: #ffffff;
+}
+
+.resultDiagramPanel {
+  display: grid;
+  gap: 5px;
+}
+
+.diagramScaleTitle {
+  color: #556173;
+  font-size: var(--control-font-size);
+  font-weight: 700;
+  line-height: 1.1;
 }
 
 .selectedElementControls {
   display: grid;
   gap: 5px;
+}
+
+.endConnectionGrid {
+  display: grid;
+  grid-template-columns: 42px repeat(2, minmax(0, 0.9fr)) 42px repeat(2, minmax(0, 0.9fr));
+  gap: 4px;
+  align-items: center;
+}
+
+.endConnectionGrid span {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: #556173;
+  font-size: var(--control-font-size);
+  white-space: nowrap;
+}
+
+.endConnectionGrid span i {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+}
+
+.endConnectionGrid button {
+  min-height: var(--control-height);
+  padding: 0 3px;
+}
+
+.elementActionRow {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.elementActionRow button {
+  min-height: var(--control-height);
+  padding: 0 4px;
+  white-space: nowrap;
+}
+
+.elementActionRow i {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 4px;
+  border-radius: 999px;
+}
+
+.selectionHeader {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 8px;
+}
+
+.selectionHeader h2 {
+  margin: 0;
+}
+
+.selectionHeader span {
+  min-width: 0;
+  overflow: hidden;
+  color: #556173;
+  font-size: var(--control-font-size);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .mergeControls {
@@ -445,9 +668,9 @@ button:disabled {
 }
 
 .mergeControls button {
-  min-height: 28px;
+  min-height: var(--control-height);
   padding: 0 6px;
-  font-size: 12px;
+  font-size: var(--control-font-size);
 }
 
 .selectionText {
@@ -489,17 +712,23 @@ button:disabled {
 .numberField span {
   min-width: 16px;
   color: #556173;
-  font-size: 13px;
+  font-size: var(--control-font-size);
   white-space: nowrap;
 }
 
 .numberField input {
   width: 100%;
   min-width: 0;
-  min-height: 26px;
-  padding: 3px 6px;
-  border: 1px solid #cfd8e3;
-  border-radius: 8px;
+  min-height: var(--control-height);
+  padding: 2px 5px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--control-radius);
+  background: #ffffff;
+  color: #243044;
+  font-family: inherit;
+  font-size: var(--control-font-size);
+  font-weight: 400;
+  line-height: 1.2;
 }
 
 .selectField {
@@ -511,23 +740,24 @@ button:disabled {
 
 .selectField span {
   color: #556173;
-  font-size: 13px;
+  font-size: var(--control-font-size);
 }
 
 .selectField select,
 .selectField input {
   width: 100%;
   min-width: 0;
-  min-height: 28px;
-  padding: 3px 6px;
-  border: 1px solid #cfd8e3;
-  border-radius: 8px;
+  min-height: var(--control-height);
+  padding: 2px 5px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--control-radius);
   background: #ffffff;
   color: #243044;
+  font-size: var(--control-font-size);
 }
 
 .colorField input[type="color"] {
-  height: 30px;
+  height: var(--control-height);
   padding: 2px;
 }
 
@@ -555,6 +785,25 @@ button:disabled {
   gap: 5px;
 }
 
+.beamLoadGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.beamLoadGrid.pointLoadGrid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.beamLoadGrid .numberField {
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 3px;
+}
+
+.beamLoadGrid .numberField span {
+  min-width: 0;
+}
+
 .loadList {
   display: grid;
   gap: 5px;
@@ -567,7 +816,7 @@ button:disabled {
   gap: 6px;
   padding: 5px 6px;
   border: 1px solid #dbe3ee;
-  border-radius: 8px;
+  border-radius: var(--control-radius);
   background: #f8fafc;
 }
 
@@ -582,15 +831,41 @@ button:disabled {
 
 .massControls {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(92px, 1fr) minmax(112px, 0.9fr) auto;
   gap: 6px;
   align-items: center;
+}
+
+.massHint {
+  min-width: 0;
+  overflow: hidden;
+  color: #8a94a6;
+  font-size: 11px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .offsetGrid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 5px;
+}
+
+.offsetGrid.plane2dGrid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.createInline {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 122px;
+  align-items: center;
+  gap: 5px;
+}
+
+.createInline button {
+  min-height: var(--control-height);
+  padding: 0 6px;
 }
 
 .panelBody .numberField {
@@ -601,13 +876,13 @@ button:disabled {
   width: 100%;
   min-height: 116px;
   resize: vertical;
-  padding: 6px 7px;
-  border: 1px solid #cfd8e3;
-  border-radius: 8px;
+  padding: 5px 6px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--control-radius);
   background: #ffffff;
   color: #243044;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
+  font-size: var(--control-font-size);
   line-height: 1.45;
 }
 
@@ -626,7 +901,7 @@ button:disabled {
 .error {
   padding: 8px 10px;
   border: 1px solid #f3b3aa;
-  border-radius: 8px;
+  border-radius: var(--control-radius);
   background: #fff4f2;
   color: #b42318;
   font-size: 13px;
@@ -639,18 +914,18 @@ button:disabled {
   z-index: 18;
   display: grid;
   gap: 7px;
-  width: min(360px, calc(100vw - 374px));
+  width: min(360px, calc(100vw - 475px));
   max-height: min(46vh, 420px);
   overflow: auto;
   padding: 9px 10px 10px;
   border: 1px solid rgba(36, 48, 68, 0.18);
-  border-radius: 8px;
+  border-radius: var(--control-radius);
   background: rgba(255, 255, 255, 0.96);
   box-shadow: 0 16px 42px rgba(24, 33, 47, 0.2);
 }
 
 .modalResultPopup {
-  width: min(245px, calc(100vw - 374px));
+  width: min(245px, calc(100vw - 475px));
   max-height: min(52vh, 430px);
 }
 

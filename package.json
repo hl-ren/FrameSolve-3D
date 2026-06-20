@@ -1,12 +1,12 @@
 {
-  "name": "framesolve-3d",
+  "name": "frameguide-2d-3d",
   "private": true,
   "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "build:release": "tsc -b && rolldown src/release-main.tsx --file release/FrameSolve-3D-v1.0/assets/app.js --format iife --name FrameSolve3D --platform browser --minify",
+    "build:release": "tsc -b && rolldown src/release-main.tsx --file release/FrameGuide-2D-3D-v1.0/assets/app.js --format iife --name FrameGuide --platform browser --minify",
     "test:beam": "mkdir -p .tmp && rolldown scripts/beam-tests.ts --file .tmp/beam-tests.mjs --format esm --platform node --log-level warn && node .tmp/beam-tests.mjs",
     "typecheck": "tsc -b",
     "preview": "vite preview"

@@ -207,6 +207,13 @@ function elementLoadLocalVector(load: ElementLoad, axes: Matrix, lengthValue: nu
   return out;
 }
 
+function releaseLoadVector(load: number[], released: number[]): number[] {
+  if (released.length === 0) return load;
+  const next = [...load];
+  for (const index of released) next[index] = 0;
+  return next;
+}
+
 function elementDofIndices(element: StructureElement, nodeOffset: Map<string, number>): number[] {
   const start = nodeOffset.get(element.startNodeId);
   const end = nodeOffset.get(element.endNodeId);
@@ -253,12 +260,17 @@ function activeModel(inputModel: StructureModel): { model: StructureModel; inact
         nodalMasses: (inputModel.nodalMasses ?? []).filter((mass) => connectedNodeIds.has(mass.nodeId)),
       };
   const nodeMap = new Map(baseModel.nodes.map((node) => [node.id, node]));
+  const hasExplicitBendingConnection = (release: StructureElement["releaseStart"]) => release?.ry !== undefined || release?.rz !== undefined;
   const model: StructureModel = {
     ...baseModel,
     elements: baseModel.elements.map((element) => {
       if (element.type !== "beam3d") return element;
-      const startHinged = nodeMap.get(element.startNodeId)?.joint === "hinged";
-      const endHinged = nodeMap.get(element.endNodeId)?.joint === "hinged";
+      const startHinged = hasExplicitBendingConnection(element.releaseStart)
+        ? Boolean(element.releaseStart?.ry || element.releaseStart?.rz)
+        : nodeMap.get(element.startNodeId)?.joint === "hinged";
+      const endHinged = hasExplicitBendingConnection(element.releaseEnd)
+        ? Boolean(element.releaseEnd?.ry || element.releaseEnd?.rz)
+        : nodeMap.get(element.endNodeId)?.joint === "hinged";
       if (!startHinged && !endHinged) return element;
       return {
         ...element,
@@ -492,7 +504,7 @@ export function solveStructure(inputModel: StructureModel): SolveResult {
     if (!element || element.type !== "beam3d") continue;
     const matrices = elementMatrices.get(element.id);
     if (!matrices) continue;
-    const localLoad = elementLoadLocalVector(load, matrices.axes, matrices.length);
+    const localLoad = releaseLoadVector(elementLoadLocalVector(load, matrices.axes, matrices.length), releaseIndices(element));
     const globalLoad = multiplyVector(transpose(matrices.transform), localLoad);
     const indices = elementDofIndices(element, nodeOffset);
     for (let i = 0; i < 12; i += 1) {

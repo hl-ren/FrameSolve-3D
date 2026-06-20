@@ -138,6 +138,39 @@ function simplySupportedMidpointTest(): void {
   assertClose({ name: "simple beam midpoint load right reaction", actual: result.reactions.N2.uz, expected: -P / 2, tolerance: 1e-6 });
 }
 
+function hingedFrameElementPointLoadTest(): void {
+  const P = -1000;
+  const model: StructureModel = {
+    ...modelBase(),
+    nodes: [
+      { id: "N1", x: 0, y: 0, z: 0 },
+      { id: "N2", x: 4, y: 0, z: 0 },
+      { id: "N3", x: 4, y: 0, z: 3, joint: "hinged" },
+      { id: "N4", x: 0, y: 0, z: 3, joint: "hinged" },
+    ],
+    elements: [
+      { id: "E1", type: "bar3d", startNodeId: "N1", endNodeId: "N2", materialId: "mat", sectionId: "sec" },
+      { id: "E2", type: "bar3d", startNodeId: "N1", endNodeId: "N4", materialId: "mat", sectionId: "sec" },
+      { id: "E3", type: "bar3d", startNodeId: "N2", endNodeId: "N3", materialId: "mat", sectionId: "sec" },
+      { id: "E4", type: "beam3d", startNodeId: "N4", endNodeId: "N3", materialId: "mat", sectionId: "sec" },
+      { id: "E5", type: "bar3d", startNodeId: "N1", endNodeId: "N3", materialId: "mat", sectionId: "sec" },
+      { id: "E6", type: "bar3d", startNodeId: "N2", endNodeId: "N4", materialId: "mat", sectionId: "sec" },
+    ],
+    boundaries: [
+      { nodeId: "N1", ux: true, uy: true, uz: true, rx: true, rz: true },
+      { nodeId: "N2", ux: true, uy: true, uz: true, rx: true, rz: true },
+      { nodeId: "N3", uy: true, rx: true, rz: true },
+      { nodeId: "N4", uy: true, rx: true, rz: true },
+    ],
+    loads: [],
+    elementLoads: [{ id: "L1", elementId: "E4", type: "point", coordinate: "global", position: 0.5, fz: P }],
+    nodalMasses: [],
+  };
+  const result = solveStructure(model);
+  const reactionSum = (result.reactions.N1.uz ?? 0) + (result.reactions.N2.uz ?? 0);
+  assertClose({ name: "hinged frame element point load vertical equilibrium", actual: reactionSum, expected: -P, tolerance: 1e-6 });
+}
+
 function axialFrequencyTest(): void {
   const L = 2;
   const m = 25;
@@ -300,6 +333,7 @@ cantileverEndPointTest();
 cantileverDistributedTest();
 cantileverElementPointTest();
 simplySupportedMidpointTest();
+hingedFrameElementPointLoadTest();
 axialFrequencyTest();
 twoDofSpringMassFrequencyTest();
 densityLumpedMassFrequencyTest();
